@@ -12,7 +12,8 @@ version = 5.0
 # IMPORTANT: sounddevice pe Android necesită rețeta portaudio din p4a.
 # numpy și scipy se compilează din sursă (~15min prima dată, cached ulterior).
 # ── Requirements ──────────────────────────────────────────────
-requirements = python3==3.10.14,kivy==2.3.0,numpy,scipy,pyjnius
+# ── Requirements ──────────────────────────────────────────────
+requirements = hostpython3==3.10.14,python3==3.10.14,kivy==2.3.0,numpy,scipy,pyjnius
 # Fallback fără sounddevice (dacă build pică):
 # requirements = python3==3.10.14,kivy==2.3.0,numpy,scipy
 
