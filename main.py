@@ -31,28 +31,102 @@ def _mc(sos, x, zi):
 
 
 class BinauralSurround3D:
+    """
+    3D Surround binaural calitate ridicată pentru căști.
+    Straturi:
+      1. Cross-feed (Bauer): LP 700Hz + ITD 0.25ms — elimină localizarea in-cap
+      2. Virtual rear HRTF: side component + head-shadow LP 3kHz + ITD 0.55ms
+      3. Pinna elevation: +3dB@1.5kHz, -6dB@9kHz → percepție înălțime
+    """
     def __init__(self, sr):
         self.sr = sr
-        b, a = butter(1, 800, 'low', fs=sr)
-        self.b, self.a = b, a
-        self.zi = [np.zeros(max(len(a), len(b)) - 1),
-                   np.zeros(max(len(a), len(b)) - 1)]
-        self.delay_samp = max(1, int(sr * 0.00032))
-        self.history = np.zeros((self.delay_samp, 2))
+        # 1. Cross-feed LP 700Hz
+        b_cf, a_cf = butter(2, 700.0, 'low', fs=sr)
+        self.b_cf = b_cf; self.a_cf = a_cf
+        zi_sz = max(len(a_cf), len(b_cf)) - 1
+        self._cf_zi = [np.zeros(zi_sz), np.zeros(zi_sz)]
+        # Cross-feed delay ~0.25ms
+        cf_d = max(2, int(sr * 0.00025))
+        self._cf_d = cf_d
+        sz = cf_d + BLOCKSIZE * 2 + 8
+        self._cf_bL = np.zeros(sz); self._cf_pL = 0
+        self._cf_bR = np.zeros(sz); self._cf_pR = 0
+        self._cf_m  = sz
+        # 2. Head-shadow LP 3kHz (rear)
+        b_hs, a_hs = butter(2, 3000.0, 'low', fs=sr)
+        self.b_hs = b_hs; self.a_hs = a_hs
+        zi_hs = max(len(a_hs), len(b_hs)) - 1
+        self._hs_zi = [np.zeros(zi_hs), np.zeros(zi_hs)]
+        # Rear ITD ~0.55ms
+        rd = max(2, int(sr * 0.00055))
+        self._rd = rd
+        sz2 = rd + BLOCKSIZE * 2 + 8
+        self._rb_L = np.zeros(sz2); self._rp_L = 0
+        self._rb_R = np.zeros(sz2); self._rp_R = 0
+        self._rm   = sz2
+        # 3. Pinna: peaking +3dB@1500Hz Q1.5 și notch -6dB@9000Hz Q2
+        def _peak(f0, dBg, Q):
+            A=10**(dBg/40); w0=2*math.pi*f0/sr
+            sn=math.sin(w0); cs=math.cos(w0); alpha=sn/(2*Q)
+            b0=1+alpha*A; b1=-2*cs; b2=1-alpha*A
+            a0=1+alpha/A; a1=-2*cs; a2=1-alpha/A
+            return np.array([b0/a0,b1/a0,b2/a0]), np.array([1,a1/a0,a2/a0])
+        self.b_p1,self.a_p1 = _peak(1500, +3.0, 1.5)
+        self.b_p2,self.a_p2 = _peak(9000, -6.0, 2.0)
+        zi_p = max(len(self.a_p1), len(self.b_p1)) - 1
+        self._p1_zi = [np.zeros(zi_p), np.zeros(zi_p)]
+        self._p2_zi = [np.zeros(zi_p), np.zeros(zi_p)]
+
+    def _delay(self, x, buf, pos, d, m):
+        n = len(x)
+        # Read first (corect și pentru d < BLOCKSIZE)
+        rs = (pos - d) % m; re = rs + n
+        if re <= m: out = buf[rs:re].copy()
+        else: out = np.concatenate([buf[rs:], buf[:re-m]])
+        # Then write
+        we = pos + n
+        if we <= m: buf[pos:we] = x
+        else: s=m-pos; buf[pos:]=x[:s]; buf[:we-m]=x[s:]
+        return out, we % m
 
     def process(self, x, strength):
         if strength < 0.01 or x.shape[1] < 2:
             return x
-        fx = np.empty_like(x)
-        fx[:, 0], self.zi[0] = lfilter(self.b, self.a, x[:, 0], zi=self.zi[0])
-        fx[:, 1], self.zi[1] = lfilter(self.b, self.a, x[:, 1], zi=self.zi[1])
-        delayed = np.concatenate([self.history, fx])
-        cf = delayed[:-self.delay_samp]
-        self.history = delayed[-self.delay_samp:]
-        out = np.empty_like(x)
-        out[:, 0] = x[:, 0] + cf[:, 1] * (strength * 0.55)
-        out[:, 1] = x[:, 1] + cf[:, 0] * (strength * 0.55)
-        return out / (1.0 + strength * 0.3)
+        s = min(1.0, strength)
+        L = x[:,0].copy(); R = x[:,1].copy()
+
+        # 1. Cross-feed
+        Lf, self._cf_zi[0] = lfilter(self.b_cf, self.a_cf, L, zi=self._cf_zi[0])
+        Rf, self._cf_zi[1] = lfilter(self.b_cf, self.a_cf, R, zi=self._cf_zi[1])
+        Lfd, self._cf_pL = self._delay(Lf, self._cf_bL, self._cf_pL, self._cf_d, self._cf_m)
+        Rfd, self._cf_pR = self._delay(Rf, self._cf_bR, self._cf_pR, self._cf_d, self._cf_m)
+        cf = 0.22 * s
+        L_cf = L + Rfd * cf
+        R_cf = R + Lfd * cf
+
+        # 2. Virtual rear
+        side = (L - R) * 0.5
+        sL,  self._hs_zi[0] = lfilter(self.b_hs, self.a_hs,  side, zi=self._hs_zi[0])
+        sR,  self._hs_zi[1] = lfilter(self.b_hs, self.a_hs, -side, zi=self._hs_zi[1])
+        sLd, self._rp_L = self._delay(sL, self._rb_L, self._rp_L, self._rd, self._rm)
+        sRd, self._rp_R = self._delay(sR, self._rb_R, self._rp_R, self._rd, self._rm)
+        rear = 0.28 * s
+        L_out = L_cf - sLd * rear
+        R_out = R_cf + sRd * rear
+
+        # 3. Pinna elevation
+        pe = 0.35 * s
+        Lp, self._p1_zi[0] = lfilter(self.b_p1, self.a_p1, L_out, zi=self._p1_zi[0])
+        Lp, self._p2_zi[0] = lfilter(self.b_p2, self.a_p2, Lp,    zi=self._p2_zi[0])
+        Rp, self._p1_zi[1] = lfilter(self.b_p1, self.a_p1, R_out, zi=self._p1_zi[1])
+        Rp, self._p2_zi[1] = lfilter(self.b_p2, self.a_p2, Rp,    zi=self._p2_zi[1])
+        L_out = L_out*(1-pe) + Lp*pe
+        R_out = R_out*(1-pe) + Rp*pe
+
+        result = x.copy()
+        result[:,0] = x[:,0]*(1-s) + L_out*s
+        result[:,1] = x[:,1]*(1-s) + R_out*s
+        return result / (1.0 + s * 0.15)
 
 
 class TrueAmbience:
@@ -90,11 +164,22 @@ class TrueAmbience:
             pos = (pos + 1) % d
         return out, pos
 
-    def process(self, x, amount, size):
+    def process(self, x, amount, size, damp=0.45, pre_ms=15.0):
         if amount < 0.01: return x
         n = x.shape[0]; N = self._N
+        # Pre-delay
+        pre_samp = max(0, min(int(self.sr * pre_ms / 1000), N - n - 2))
         aL, self._hp_zi[0] = lfilter(self._hp_b, self._hp_a, x[:,0], zi=self._hp_zi[0])
         aR, self._hp_zi[1] = lfilter(self._hp_b, self._hp_a, x[:,1], zi=self._hp_zi[1])
+        # Damping HF: damp=0→no LP, damp=1→full LP 6kHz
+        lp_fc = max(500.0, 20000.0 * (1.0 - damp * 0.7))
+        if damp > 0.05:
+            b_d, a_d = butter(1, lp_fc, 'low', fs=self.sr)
+            zi_sz = max(len(a_d), len(b_d)) - 1
+            if not hasattr(self, '_damp_zi'):
+                self._damp_zi = [np.zeros(zi_sz), np.zeros(zi_sz)]
+            aL, self._damp_zi[0] = lfilter(b_d, a_d, aL, zi=self._damp_zi[0])
+            aR, self._damp_zi[1] = lfilter(b_d, a_d, aR, zi=self._damp_zi[1])
         aL, self._lp_zi[0] = lfilter(self._lp_b, self._lp_a, aL, zi=self._lp_zi[0])
         aR, self._lp_zi[1] = lfilter(self._lp_b, self._lp_a, aR, zi=self._lp_zi[1])
         end = self._pos + n
@@ -107,7 +192,7 @@ class TrueAmbience:
 
         def rd(buf, ms):
             sc = 0.5 + size * 1.0
-            d  = max(1, int(self.sr * ms * sc / 1000))
+            d  = max(1, int(self.sr * ms * sc / 1000)) + pre_samp
             rs = (self._pos - d) % N; re = rs + n
             if re <= N: return buf[rs:re].copy()
             return np.concatenate([buf[rs:], buf[:re-N]])
@@ -139,7 +224,16 @@ class RadioDSP:
         self.output_db=1.0; self.lim_ceiling=0.96
         self.deesser_db=0.0; self.upscale=0.0
         self.ambience_wet=0.0; self.ambience_room=0.50
+        self.ambience_damp=0.45; self.ambience_pre=15.0
         self.surround_str=0.0
+        # Parametric EQ — 5 benzi (ca audioboost3)
+        self.peq_bands = [
+            {'freq': 80.0,    'gain_db': 0.0, 'q': 1.4, 'enabled': False},
+            {'freq': 250.0,   'gain_db': 0.0, 'q': 1.4, 'enabled': False},
+            {'freq': 1000.0,  'gain_db': 0.0, 'q': 1.4, 'enabled': False},
+            {'freq': 4000.0,  'gain_db': 0.0, 'q': 1.4, 'enabled': False},
+            {'freq': 12000.0, 'gain_db': 0.0, 'q': 1.4, 'enabled': False},
+        ]
         self._lock=threading.Lock(); self._master_lin=1.0
         self._build_filters()
 
@@ -182,6 +276,8 @@ class RadioDSP:
         self.alpha_r = np.exp(-1/(spb*120/1000+1e-9))
         self._ambience = TrueAmbience(sr)
         self._surround = BinauralSurround3D(sr)
+        # PEQ state
+        self.zi_peq = [np.zeros((1, ch, 2)) for _ in range(5)]
 
     @staticmethod
     def _lin(db): return 10.0**(db/20.0)
@@ -231,7 +327,9 @@ class RadioDSP:
             pmix=self.parallel_mix; sw=self.stereo_w; haas=self.haas_ms
             od=self.output_db; ds_db=self.deesser_db; up_amt=self.upscale
             amb_wet=self.ambience_wet; amb_room=self.ambience_room
+            amb_damp=self.ambience_damp; amb_pre=self.ambience_pre
             sur_str=self.surround_str
+            peq_bands = list(self.peq_bands)
         x=audio.astype(np.float64)
         if in_db!=0.0: x*=self._lin(in_db)
         x_bs,self.zi_bs=_mc(self.sos_bs,x,self.zi_bs); x+=x_bs*(self._lin(bd)-1.0)
@@ -244,6 +342,11 @@ class RadioDSP:
             sat=(np.tanh(x_ex*2.0)*0.60+np.tanh(x_ex*4.5)*0.28+np.tanh(x_ex*9.0)*0.12)
             rms_sat=np.sqrt(np.mean(sat**2)+1e-12)
             x+=sat*(rms_in/rms_sat)*ex*0.45
+        # Parametric EQ — 5 benzi
+        for i, band in enumerate(peq_bands):
+            if band['enabled'] and abs(band['gain_db']) > 0.05:
+                sos_p = self._peaking_sos(band['freq'], band['gain_db'], band['q'], self.sr)
+                x, self.zi_peq[i] = _mc(sos_p, x, self.zi_peq[i])
         if ds_db>0.1:
             x_sib,self.zi_ds=_mc(self.sos_ds,x,self.zi_ds)
             rms_sib=np.sqrt(np.mean(x_sib**2,axis=0)+1e-12)
@@ -287,7 +390,7 @@ class RadioDSP:
                 x[:,1]=self._haas_delay(x[:,1],ds)
             mid=(x[:,0]+x[:,1])*0.5; side=(x[:,0]-x[:,1])*0.5*sw
             x[:,0]=mid+side; x[:,1]=mid-side
-        x=self._ambience.process(x,amb_wet,amb_room)
+        x=self._ambience.process(x, amb_wet, amb_room, amb_damp, amb_pre)
         x=self._surround.process(x,sur_str)
         if od!=0.0: x*=self._lin(od)
         x=self._limiter_vec(x)
@@ -297,7 +400,8 @@ class RadioDSP:
     def get_master(self):   return self._master_lin
 
     def update(self, in_db,bd,td,pd,ex,thr,rat,mkup,pmix,sw,haas,od,
-               ds=0.0, up=0.0, amb_wet=0.0, amb_room=0.5, sur_str=0.0):
+               ds=0.0, up=0.0, amb_wet=0.0, amb_room=0.5,
+               amb_damp=0.45, amb_pre=15.0, sur_str=0.0):
         with self._lock:
             self.input_db=in_db; self.bass_db=bd; self.treble_db=td
             self.presence_db=pd; self.exciter=ex; self.thresh_db=thr
@@ -305,7 +409,16 @@ class RadioDSP:
             self.stereo_w=sw; self.haas_ms=haas; self.output_db=od
             self.deesser_db=ds; self.upscale=up
             self.ambience_wet=amb_wet; self.ambience_room=amb_room
+            self.ambience_damp=amb_damp; self.ambience_pre=amb_pre
             self.surround_str=sur_str
+
+    def update_peq(self, idx: int, freq: float, gain_db: float,
+                   q: float, enabled: bool):
+        with self._lock:
+            b = self.peq_bands[idx]
+            if abs(b['freq'] - freq) > 1.0:
+                self.zi_peq[idx] = np.zeros((1, self.ch, 2))
+            b['freq']=freq; b['gain_db']=gain_db; b['q']=q; b['enabled']=enabled
 
 
 # ══════════════════════════════════════════════════════════════
@@ -449,6 +562,66 @@ class VUMeter(Widget):
             # Border
             Color(*C_DIM)
             Line(rectangle=(*self.pos, *self.size), width=dp(1))
+
+
+# ── PEQ Row compact ──────────────────────────────────────────
+class PEQRow(BoxLayout):
+    """Rând PEQ compact: ON | Freq | Gain | Q"""
+    def __init__(self, idx, name, f_def, callback=None, **kw):
+        super().__init__(orientation='horizontal', size_hint_y=None,
+                         height=dp(44), **kw)
+        self.idx = idx; self._cb = callback
+        self.freq = f_def; self.gain_db = 0.0
+        self.q    = 1.4;   self.enabled = False
+        self.padding = [dp(6), dp(2), dp(6), dp(2)]
+        self.spacing = dp(4)
+
+        self._on_btn = ToggleButton(text=name, size_hint_x=None, width=dp(72),
+                                    font_size=sp(9), bold=True,
+                                    background_normal='', background_down='',
+                                    background_color=C_PAN, color=C_DIM)
+        self._on_btn.bind(on_press=self._tog)
+        self.add_widget(self._on_btn)
+
+        for attr, mn, mx, dfl, col, sfx in [
+            ('freq',    20, 20000, f_def, C_TEAL, 'Hz'),
+            ('gain_db',-12,    12,   0.0, C_ACC,  'dB'),
+            ('q',      0.3,   8.0,   1.4, C_BLUE, 'Q'),
+        ]:
+            sl = Slider(min=mn, max=mx, value=dfl, size_hint_x=1,
+                        cursor_size=(dp(18), dp(18)))
+            sl._ab = attr
+            sl.bind(value=self._changed)
+            self.add_widget(sl)
+            setattr(self, f'_sl_{attr}', sl)
+            fmt = f'{dfl:.0f}{sfx}' if attr == 'freq' else (
+                  f'{dfl:+.1f}{sfx}' if attr == 'gain_db' else f'Q{dfl:.1f}')
+            lv = Label(text=fmt, size_hint_x=None, width=dp(46),
+                       font_size=sp(8), bold=True, color=col,
+                       halign='center', valign='middle')
+            lv.bind(size=lv.setter('text_size'))
+            setattr(self, f'_lv_{attr}', lv)
+            self.add_widget(lv)
+
+        with self.canvas.before:
+            Color(*C_PAN)
+            self._r = Rectangle(pos=self.pos, size=self.size)
+        self.bind(pos=lambda *_: setattr(self._r, 'pos', self.pos),
+                  size=lambda *_: setattr(self._r, 'size', self.size))
+
+    def _tog(self, btn):
+        self.enabled = not self.enabled
+        self._on_btn.background_color = C_GOLD if self.enabled else C_PAN
+        self._on_btn.color = (0.0, 0.0, 0.0, 1) if self.enabled else C_DIM
+        if self._cb: self._cb(self.idx)
+
+    def _changed(self, sl, val):
+        setattr(self, sl._ab, val)
+        lv = getattr(self, f'_lv_{sl._ab}')
+        if sl._ab == 'freq':    lv.text = f'{val:.0f}Hz'
+        elif sl._ab == 'gain_db': lv.text = f'{val:+.1f}dB'
+        else:                   lv.text = f'Q{val:.1f}'
+        if self._cb: self._cb(self.idx)
 
 
 # ── Ecran principal ───────────────────────────────────────────
@@ -656,18 +829,37 @@ class MainScreen(BoxLayout):
             sv['sw'].get(),    sv['haas'].get(),sv['od'].get(),
             ds=sv['ds'].get(), up=sv['up'].get(),
             amb_wet=self._amb_wet.get(), amb_room=self._amb_disp.get(),
+            amb_damp=self._amb_damp.get(), amb_pre=self._amb_pre.get(),
             sur_str=self._sur_sl.get()
         )
 
     # ── Ambience + 3D ────────────────────────────────────────
     def _build_ambience(self):
         self._section('AMBIENCE + 3D SURROUND', C_BLUE)
-        self._amb_wet  = DSPSlider('AMBIENCE',    0.0, 1.0, 0.0, callback=lambda v: self._on_sl())
-        self._amb_disp = DSPSlider('DISPERSIE',   0.1, 0.9, 0.5, callback=lambda v: self._on_sl())
-        self._sur_sl   = DSPSlider('3D SURROUND', 0.0, 2.0, 0.0, callback=lambda v: self._on_sl())
-        self._inner.add_widget(self._amb_wet)
-        self._inner.add_widget(self._amb_disp)
-        self._inner.add_widget(self._sur_sl)
+        self._amb_wet  = DSPSlider('AMBIENCE',     0.0, 1.0,  0.0, callback=lambda v: self._on_sl())
+        self._amb_disp = DSPSlider('ROOM SIZE',    0.1, 0.9,  0.5, callback=lambda v: self._on_sl())
+        self._amb_damp = DSPSlider('DAMPING',      0.0, 1.0, 0.45, callback=lambda v: self._on_sl())
+        self._amb_pre  = DSPSlider('PRE-DELAY ms', 0.0,40.0, 15.0, unit='ms', callback=lambda v: self._on_sl())
+        self._sur_sl   = DSPSlider('3D SURROUND',  0.0, 1.0,  0.0, callback=lambda v: self._on_sl())
+        for w in [self._amb_wet, self._amb_disp, self._amb_damp, self._amb_pre, self._sur_sl]:
+            self._inner.add_widget(w)
+
+        # ── Parametric EQ 5 benzi ─────────────────────────────
+        self._section('PARAMETRIC EQ  (5 benzi)', C_GOLD)
+        PEQ_DEFS = [
+            ('Low',      80.0),  ('Low-Mid', 250.0),
+            ('Mid',    1000.0),  ('High-Mid',4000.0),
+            ('High',  12000.0),
+        ]
+        self._peq_rows = []
+        for i, (name, f_def) in enumerate(PEQ_DEFS):
+            row = PEQRow(i, name, f_def, callback=self._on_peq)
+            self._inner.add_widget(row)
+            self._peq_rows.append(row)
+
+    def _on_peq(self, idx):
+        row = self._peq_rows[idx]
+        self.dsp.update_peq(idx, row.freq, row.gain_db, row.q, row.enabled)
 
     # ── Start / Stop ─────────────────────────────────────────
     def _build_start_btn(self):
