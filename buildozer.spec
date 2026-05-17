@@ -8,18 +8,36 @@ source.include_exts = py,png,jpg,kv,atlas
 
 version = 5.0
 
-requirements = python3,kivy==2.2.1
+# ── Requirements ──────────────────────────────────────────────
+# IMPORTANT: sounddevice pe Android necesită rețeta portaudio din p4a.
+# numpy și scipy se compilează din sursă (~15min prima dată, cached ulterior).
+requirements = python3==3.10.14,kivy==2.3.0,numpy,scipy,sounddevice,portaudio
+
+# Fallback fără sounddevice (dacă build pică):
+# requirements = python3==3.10.14,kivy==2.3.0,numpy,scipy
+
+# ── Display ───────────────────────────────────────────────────
 orientation = portrait
 fullscreen = 0
 
-android.permissions = RECORD_AUDIO, MODIFY_AUDIO_SETTINGS, INTERNET
-android.api = 33
+# ── Permisiuni ────────────────────────────────────────────────
+android.permissions = RECORD_AUDIO,MODIFY_AUDIO_SETTINGS,INTERNET,WAKE_LOCK
+
+# ── Android API ───────────────────────────────────────────────
+android.api = 34
 android.minapi = 24
-android.ndk = 28c
-android.sdk = 33
+android.ndk = 25b
+android.sdk = 34
 android.accept_sdk_license = True
 
-android.archs = arm64-v8a, armeabi-v7a
+# ── Arhitecturi (arm64 = telefoane moderne) ───────────────────
+android.archs = arm64-v8a
+
+# ── p4a branch cu suport numpy/scipy actualizat ───────────────
+p4a.branch = develop
+
+# ── Gradle ────────────────────────────────────────────────────
+android.gradle_dependencies = androidx.appcompat:appcompat:1.6.1
 
 [buildozer]
 log_level = 2
