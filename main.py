@@ -16,12 +16,100 @@ import threading, time, math
 import numpy as np
 from scipy.signal import butter, sosfilt, sosfilt_zi, lfilter
 
+# ── Detecție platformă ────────────────────────────────────────
+try:
+    from kivy.utils import platform as _kv_platform
+    IS_ANDROID = (_kv_platform == 'android')
+except Exception:
+    IS_ANDROID = False
+
+# ── Backend audio: sounddevice (PC) sau AudioRecord (Android) ─
+SD_OK = False
+if not IS_ANDROID:
+    try:
+        import sounddevice as sd
+        SD_OK = True
+    except ImportError:
+        pass
+
 # ══════════════════════════════════════════════════════════════
 #   DSP — identic cu versiunea desktop
 # ══════════════════════════════════════════════════════════════
 
 BLOCKSIZE = 1024
 CHANNELS  = 2
+
+
+# ══════════════════════════════════════════════════════════════
+#   ANDROID AUDIO — AudioRecord + AudioTrack via pyjnius
+# ══════════════════════════════════════════════════════════════
+
+class AndroidAudioStream:
+    """
+    Înlocuiește sounddevice pe Android.
+    Folosește AudioRecord (microfon) + AudioTrack (ieșire)
+    cu același callback ca sd.Stream.
+    """
+    def __init__(self, sr, blocksize, channels, callback):
+        self.sr = sr; self.bs = blocksize
+        self.ch = channels; self._cb = callback
+        self._running = False; self._thread = None
+
+    def start(self):
+        self._running = True
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._running = False
+        if self._thread: self._thread.join(timeout=2.0)
+
+    def close(self): self.stop()
+
+    def _loop(self):
+        try:
+            from jnius import autoclass
+            AudioRecord  = autoclass('android.media.AudioRecord')
+            AudioTrack   = autoclass('android.media.AudioTrack')
+            AudioFormat  = autoclass('android.media.AudioFormat')
+            AudioManager = autoclass('android.media.AudioManager')
+
+            # Encoding: PCM 16-bit
+            enc   = AudioFormat.ENCODING_PCM_16BIT
+            ch_in = AudioFormat.CHANNEL_IN_STEREO if self.ch==2 else AudioFormat.CHANNEL_IN_MONO
+            ch_out= AudioFormat.CHANNEL_OUT_STEREO if self.ch==2 else AudioFormat.CHANNEL_OUT_MONO
+            src   = 1   # MIC
+
+            buf_sz_in  = max(self.bs * self.ch * 2,
+                             AudioRecord.getMinBufferSize(self.sr, ch_in, enc))
+            buf_sz_out = max(self.bs * self.ch * 2,
+                             AudioTrack.getMinBufferSize(self.sr, ch_out, enc))
+
+            rec = AudioRecord(src, self.sr, ch_in, enc, buf_sz_in)
+            trk = AudioTrack(AudioManager.STREAM_MUSIC, self.sr,
+                             ch_out, enc, buf_sz_out,
+                             AudioTrack.MODE_STREAM)
+            rec.startRecording(); trk.play()
+
+            import array as arr
+            n_samples = self.bs * self.ch
+
+            while self._running:
+                buf_in = arr.array('h', [0] * n_samples)
+                rec.read(buf_in, n_samples)
+                # Convertim la float32 [-1, 1]
+                in_f32 = np.frombuffer(bytes(buf_in), dtype=np.int16).astype(np.float32) / 32768.0
+                indata = in_f32.reshape(-1, self.ch)
+                outdata = np.zeros_like(indata)
+                self._cb(indata, outdata, self.bs, None, None)
+                # Convertim la int16
+                out_i16 = (np.clip(outdata, -1, 1) * 32767).astype(np.int16)
+                trk.write(out_i16.tobytes(), len(out_i16.tobytes()), AudioTrack.WRITE_NON_BLOCKING)
+
+            rec.stop(); rec.release()
+            trk.stop(); trk.release()
+        except Exception as e:
+            print(f"[AndroidAudio] Eroare: {e}")
 
 def _mc(sos, x, zi):
     ch = x.shape[1]; y = np.empty_like(x); zi_new = np.empty_like(zi)
