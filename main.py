@@ -14,7 +14,104 @@ Build APK:
 
 import threading, time, math
 import numpy as np
-from scipy.signal import butter, sosfilt, sosfilt_zi, lfilter
+
+# ── Filtre IIR pure numpy (fără scipy) ────────────────────────
+# scipy nu compilează corect pe Android cu Python 3.14
+
+def butter(order, cutoff, btype='low', fs=None):
+    """Butterworth IIR — returnează (b, a) biquad. Doar order=2."""
+    if fs is None:
+        raise ValueError("fs required")
+    w0 = 2.0 * math.pi * cutoff / fs
+    K = math.tan(w0 / 2.0)
+    if order == 1:
+        if btype == 'low':
+            a0 = 1.0 + K
+            b = np.array([K / a0, K / a0])
+            a = np.array([1.0, (K - 1.0) / a0])
+        elif btype == 'high':
+            a0 = 1.0 + K
+            b = np.array([1.0 / a0, -1.0 / a0])
+            a = np.array([1.0, (K - 1.0) / a0])
+        else:
+            raise ValueError(f"btype {btype} not supported for order=1")
+        return b, a
+    elif order == 2:
+        sq2 = math.sqrt(2.0)
+        if btype == 'low':
+            a0 = 1.0 + sq2 * K + K * K
+            b = np.array([K*K / a0, 2.0*K*K / a0, K*K / a0])
+            a = np.array([1.0, 2.0*(K*K - 1.0)/a0, (1.0 - sq2*K + K*K)/a0])
+        elif btype == 'high':
+            a0 = 1.0 + sq2 * K + K * K
+            b = np.array([1.0 / a0, -2.0 / a0, 1.0 / a0])
+            a = np.array([1.0, 2.0*(K*K - 1.0)/a0, (1.0 - sq2*K + K*K)/a0])
+        elif btype == 'band':
+            # Bandpass peaking la w0 cu Q=1 (lățime ≈ o octavă)
+            # Pentru bandpass de bază:
+            a0 = 1.0 + K + K * K
+            b = np.array([K / a0, 0.0, -K / a0])
+            a = np.array([1.0, 2.0*(K*K - 1.0)/a0, (1.0 - K + K*K)/a0])
+        else:
+            raise ValueError(f"btype {btype} not supported")
+        return b, a
+    else:
+        raise ValueError("Only order=1 and order=2 supported")
+
+
+def lfilter(b, a, x, zi=None):
+    """Filtru IIR direct-form II transposed. x: 1D array."""
+    n = len(x)
+    y = np.empty(n, dtype=np.float64)
+    b = np.asarray(b, dtype=np.float64)
+    a = np.asarray(a, dtype=np.float64)
+    order = max(len(b), len(a)) - 1
+    if zi is not None:
+        z = np.array(zi, dtype=np.float64)
+    else:
+        z = np.zeros(order)
+    for i in range(n):
+        acc = b[0] * x[i] + z[0]
+        for j in range(order - 1):
+            z[j] = b[j+1] * x[i] + z[j+1] - a[j+1] * acc
+        z[order-1] = b[order] * x[i] - a[order] * acc
+        y[i] = acc
+    return y, z
+
+
+def sosfilt_zi(sos):
+    """Stare inițială pentru sosfilt (steady-state la intrare 1)."""
+    # sos format: [b0, b1, b2, a0, a1, a2]
+    zi = np.zeros((len(sos), 2))
+    for s, row in enumerate(sos):
+        b0, b1, b2, a0, a1, a2 = row
+        # Steady-state: y = (b0+b1+b2)/(1+a1+a2) pentru x=1 constant
+        dc = (b0 + b1 + b2) / (1.0 + a1 + a2) if (1.0 + a1 + a2) != 0 else 0.0
+        zi[s, 0] = dc
+        zi[s, 1] = dc
+    return zi
+
+
+def sosfilt(sos, x, zi=None):
+    """Cascade de biquad-uri. sos: Nx6, x: 1D, zi: Nx2"""
+    y = np.array(x, dtype=np.float64)
+    n_sec = len(sos)
+    if zi is not None:
+        z = zi.copy()
+    else:
+        z = np.zeros((n_sec, 2))
+    for s in range(n_sec):
+        b0, b1, b2, a0, a1, a2 = sos[s]
+        z0, z1 = z[s, 0], z[s, 1]
+        for i in range(len(y)):
+            xn = y[i]
+            yn = b0 * xn + z0
+            z0 = b1 * xn - a1 * yn + z1
+            z1 = b2 * xn - a2 * yn
+            y[i] = yn
+        z[s, 0] = z0
+        z[s, 1] = z1
+    return y, z
 
 # ── Detecție platformă ────────────────────────────────────────
 try:
@@ -328,7 +425,15 @@ class RadioDSP:
     def _build_filters(self):
         sr=self.sr; ch=self.ch
         def sos(ftype, freq):
-            s  = butter(2, freq, ftype, fs=sr, output='sos')
+            if isinstance(freq, (list, tuple)):
+                # Bandpass cu două frecvențe: cascadă de 2 biquad-uri
+                b1, a1 = butter(2, freq[0], 'high', fs=sr)
+                b2, a2 = butter(2, freq[1], 'low',  fs=sr)
+                s = np.array([[b1[0],b1[1],b1[2],1.0,a1[1],a1[2]],
+                              [b2[0],b2[1],b2[2],1.0,a2[1],a2[2]]])
+            else:
+                b, a = butter(2, freq, ftype, fs=sr)
+                s = np.array([[b[0],b[1],b[2],1.0,a[1],a[2]]])
             zi = sosfilt_zi(s)
             zi = np.stack([zi]*ch, axis=1)
             return s, zi.copy()
