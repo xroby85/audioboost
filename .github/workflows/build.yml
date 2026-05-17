@@ -12,6 +12,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
       - name: Install system dependencies
         run: |
           sudo apt-get update -qq
@@ -19,20 +24,17 @@ jobs:
             git zip unzip openjdk-17-jdk \
             autoconf libtool pkg-config \
             cmake ninja-build ccache \
-            libssl-dev libffi-dev zlib1g-dev \
-            python3.10 python3.10-dev python3.10-venv
+            libssl-dev libffi-dev zlib1g-dev
 
-      - name: Setup Python 3.10 venv
+      - name: Install buildozer
         run: |
-          python3.10 -m venv ~/p4a-env
-          ~/p4a-env/bin/pip install --upgrade pip
-          ~/p4a-env/bin/pip install buildozer==1.5.0 cython==3.0.11
+          python3.10 -m pip install --upgrade pip
+          python3.10 -m pip install buildozer==1.5.0 "cython==3.0.12"
 
       - name: Build APK
         timeout-minutes: 60
         run: |
-          export PATH=~/p4a-env/bin:$HOME/.local/bin:$PATH
-          export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+          export PATH=$HOME/.local/bin:$PATH
           buildozer android debug
 
       - name: Upload APK
@@ -40,4 +42,5 @@ jobs:
         with:
           name: AudioBoost-APK
           path: bin/*.apk
+          if-no-files-found: warn
           retention-days: 30
