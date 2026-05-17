@@ -549,19 +549,20 @@ def _request_android_permissions():
     if not IS_ANDROID:
         return
     try:
-        from jnius import autoclass, cast
+        from jnius import autoclass
         PythonActivity = autoclass('org.kivy.android.PythonActivity')
         activity = PythonActivity.mActivity
-        ContextCompat = autoclass('androidx.core.content.ContextCompat')
-        Manifest = autoclass('android.Manifest$permission')
-        permissions = [Manifest.RECORD_AUDIO, Manifest.CAMERA]
-        to_request = []
-        for perm in permissions:
-            if ContextCompat.checkSelfPermission(activity, perm) != 0:  # PERMISSION_GRANTED
-                to_request.append(perm)
-        if to_request:
-            ActivityCompat = autoclass('androidx.core.app.ActivityCompat')
-            ActivityCompat.requestPermissions(activity, to_request, 1001)
+        perms = ["android.permission.RECORD_AUDIO",
+                 "android.permission.CAMERA"]
+        to_req = []
+        for p in perms:
+            try:
+                if activity.checkSelfPermission(p) != 0:
+                    to_req.append(p)
+            except Exception:
+                to_req.append(p)
+        if to_req:
+            activity.requestPermissions(to_req, 1001)
     except Exception as e:
         print(f"[Permissions] Eroare: {e}")
 
@@ -1080,11 +1081,14 @@ class MainScreen(BoxLayout):
 class AudioBoostApp(KivyApp):
     def build(self):
         self.title = 'AudioBoost v5'
-        Clock.schedule_once(lambda dt: _request_android_permissions(), 1.0)
         screen = MainScreen()
         # Fix _cb rms attribute
         screen._last_rms = 1e-10
         return screen
+
+    def on_start(self):
+        if IS_ANDROID:
+            Clock.schedule_once(lambda dt: _request_android_permissions(), 2.0)
 
 
 def main():
