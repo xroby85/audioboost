@@ -8,8 +8,7 @@ source.include_exts = py,png,jpg,kv,atlas
 
 version = 5.0
 
-requirements = python3,kivy==2.3.0,numpy,scipy,sounddevice
-
+requirements = python3,kivy==2.3.0,numpy
 orientation = portrait
 fullscreen = 0
 
