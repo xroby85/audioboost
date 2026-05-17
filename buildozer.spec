@@ -1,0 +1,27 @@
+[app]
+title = AudioBoost v5
+package.name = audioboost
+package.domain = org.audioboost
+
+source.dir = .
+source.include_exts = py,png,jpg,kv,atlas
+
+version = 5.0
+
+requirements = python3,kivy==2.3.0,numpy,scipy,sounddevice
+
+orientation = portrait
+fullscreen = 0
+
+android.permissions = RECORD_AUDIO, MODIFY_AUDIO_SETTINGS, INTERNET
+android.api = 33
+android.minapi = 21
+android.ndk = 25b
+android.sdk = 33
+android.accept_sdk_license = True
+
+android.archs = arm64-v8a, armeabi-v7a
+
+[buildozer]
+log_level = 2
+warn_on_root = 1
