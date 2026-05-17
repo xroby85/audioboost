@@ -967,7 +967,33 @@ class MainScreen(BoxLayout):
             self._stop()
 
     def _start(self):
-        import sounddevice as sd
+        if IS_ANDROID:
+            self._start_android()
+        elif SD_OK:
+            self._start_desktop()
+        else:
+            self._log('sounddevice lipsă — instalează: pip install sounddevice')
+
+    def _start_android(self):
+        """Audio nativ Android prin AudioRecord/AudioTrack."""
+        try:
+            sr = 44100; ic = CHANNELS; oc = CHANNELS
+            self.dsp = RadioDSP(sr=sr, ch=ic)
+            self._on_master(self._master_sl.get())
+            self._on_sl()
+            self._err = 0
+            self.stream = AndroidAudioStream(sr, BLOCKSIZE, ic, self._cb)
+            self.stream.start()
+            self.running = True
+            self._start_btn.text = '⏹  OPREȘTE'
+            self._log(f'▶ Android AudioRecord/AudioTrack  {sr}Hz')
+            Clock.schedule_interval(self._vu_tick, 0.05)
+        except Exception as e:
+            self._log(f'EROARE Android audio: {e}')
+            self._start_btn.state = 'normal'
+
+    def _start_desktop(self):
+        """Audio desktop prin sounddevice."""
         in_idx  = self._get_device_idx(self._in_spin,  self._in_list)
         out_idx = self._get_device_idx(self._out_spin, self._out_list)
         if in_idx is None or out_idx is None:
@@ -991,7 +1017,6 @@ class MainScreen(BoxLayout):
             self.running = True
             self._start_btn.text = '⏹  OPREȘTE'
             self._log(f'▶ {ind["name"]} → {oud["name"]}  {sr}Hz')
-            # VU meter clock
             Clock.schedule_interval(self._vu_tick, 0.05)
         except Exception as e:
             self._log(f'EROARE: {e}')
