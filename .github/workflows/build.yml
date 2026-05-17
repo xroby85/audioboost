@@ -35,7 +35,7 @@ jobs:
           restore-keys: |
             pip-${{ runner.os }}-
 
-      # ── Dependențe sistem ──────────────────────────────────────────────
+     # ── Dependențe sistem ──────────────────────────────────────────────
       - name: Install system dependencies
         run: |
           sudo apt-get update -qq
@@ -45,7 +45,7 @@ jobs:
             autoconf libtool pkg-config \
             cmake ninja-build ccache \
             libssl-dev libffi-dev zlib1g-dev \
-            python3-dev
+            python3-dev gfortran libopenblas-dev liblapack-dev
 
       # ── Instalare buildozer + cython versiuni compatibile ─────────────
       - name: Install buildozer and cython
@@ -79,7 +79,7 @@ jobs:
           path: bin/*.apk
           if-no-files-found: warn
           retention-days: 30
-
+        
       # ── Upload log mereu (și la succes și la eșec) ────────────────────
       - name: Upload build log
         if: always()
