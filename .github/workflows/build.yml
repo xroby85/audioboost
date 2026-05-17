@@ -34,6 +34,7 @@ jobs:
       - name: Build APK
         timeout-minutes: 60
         run: |
+          export JAVA_HOME=/usr/lib/jvm/temurin-17-jdk-amd64
           export PATH=$HOME/.local/bin:$PATH
           buildozer android debug
 
