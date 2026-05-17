@@ -64,31 +64,28 @@ jobs:
         timeout-minutes: 60
         run: |
           buildozer -v android debug 2>&1 | tee build.log
+          # Verifică dacă APK-ul a fost creat
+          ls bin/*.apk 2>/dev/null && echo "✓ APK creat cu succes" || (echo "✗ APK negăsit în bin/" && exit 1)
         env:
           JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
           ANDROID_SDK_ROOT: ${{ github.workspace }}/.buildozer/android/platform/android-sdk
 
       # ── Upload APK ca artifact ────────────────────────────────────────
-      - name: Find APK
-        id: find_apk
-        run: |
-          APK=$(find . -name "*.apk" | head -1)
-          echo "apk_path=$APK" >> $GITHUB_OUTPUT
-          echo "APK găsit: $APK"
-
       - name: Upload APK
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: AudioBoost-APK
-          path: ${{ steps.find_apk.outputs.apk_path }}
-          if-no-files-found: error
+          path: bin/*.apk
+          if-no-files-found: warn
           retention-days: 30
 
-      # ── Upload log dacă build a eșuat ─────────────────────────────────
-      - name: Upload build log on failure
-        if: failure()
+      # ── Upload log mereu (și la succes și la eșec) ────────────────────
+      - name: Upload build log
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: build-log
           path: build.log
+          if-no-files-found: ignore
           retention-days: 7
