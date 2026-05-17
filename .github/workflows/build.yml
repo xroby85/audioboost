@@ -10,82 +10,37 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
-      # ── Python 3.10 (3.11 are incompatibilități cu buildozer/cython) ──
       - name: Set up Python 3.10
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      # ── Cache buildozer + Android SDK/NDK (~3GB, evită 20min reinstall) ──
-      - name: Cache buildozer global dir
-        uses: actions/cache@v3
-        with:
-          path: ~/.buildozer
-          key: buildozer-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
-          restore-keys: |
-            buildozer-${{ runner.os }}-
-
-      - name: Cache pip packages
-        uses: actions/cache@v3
-        with:
-          path: ~/.cache/pip
-          key: pip-${{ runner.os }}-${{ hashFiles('**/requirements*.txt') }}
-          restore-keys: |
-            pip-${{ runner.os }}-
-
-     # ── Dependențe sistem ──────────────────────────────────────────────
       - name: Install system dependencies
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y \
-            git zip unzip \
-            openjdk-17-jdk \
+            git zip unzip openjdk-17-jdk \
             autoconf libtool pkg-config \
             cmake ninja-build ccache \
-            libssl-dev libffi-dev zlib1g-dev \
-            python3-dev gfortran libopenblas-dev liblapack-dev
+            libssl-dev libffi-dev zlib1g-dev
 
-      # ── Instalare buildozer + cython versiuni compatibile ─────────────
-      - name: Install buildozer and cython
+      - name: Install buildozer
         run: |
-          pip install --upgrade pip
-          pip install buildozer==1.5.0 cython==0.29.37
-          # Forțăm p4a develop pentru numpy/scipy actualizat
-          pip install python-for-android
+          python3.10 -m pip install --upgrade pip
+          python3.10 -m pip install buildozer==1.5.0 "cython<3.0"
 
-      # ── Setare JAVA_HOME ──────────────────────────────────────────────
-      - name: Set JAVA_HOME
-        run: echo "JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64" >> $GITHUB_ENV
-
-      # ── Build APK ─────────────────────────────────────────────────────
       - name: Build APK
         timeout-minutes: 60
         run: |
-          buildozer -v android debug 2>&1 | tee build.log
-          # Verifică dacă APK-ul a fost creat
-          ls bin/*.apk 2>/dev/null && echo "✓ APK creat cu succes" || (echo "✗ APK negăsit în bin/" && exit 1)
-        env:
-          JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
-          ANDROID_SDK_ROOT: ${{ github.workspace }}/.buildozer/android/platform/android-sdk
+          export PATH=$HOME/.local/bin:$PATH
+          buildozer android debug
 
-      # ── Upload APK ca artifact ────────────────────────────────────────
       - name: Upload APK
-        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: AudioBoost-APK
           path: bin/*.apk
           if-no-files-found: warn
           retention-days: 30
-        
-      # ── Upload log mereu (și la succes și la eșec) ────────────────────
-      - name: Upload build log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-log
-          path: build.log
-          if-no-files-found: ignore
-          retention-days: 7
