@@ -40,17 +40,12 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y \
-            git zip unzip openjdk-17-jdk \
+            git zip unzip \
+            openjdk-17-jdk \
             autoconf libtool pkg-config \
             cmake ninja-build ccache \
-            libssl-dev libffi-dev \
-            libsdl2-dev libsdl2-image-dev \
-            libsdl2-mixer-dev libsdl2-ttf-dev \
-            libportmidi-dev libswscale-dev \
-            libavformat-dev libavcodec-dev \
-            zlib1g-dev libgstreamer1.0 \
-            gstreamer1.0-plugins-base \
-            gstreamer1.0-plugins-good
+            libssl-dev libffi-dev zlib1g-dev \
+            python3-dev
 
       # ── Instalare buildozer + cython versiuni compatibile ─────────────
       - name: Install buildozer and cython
