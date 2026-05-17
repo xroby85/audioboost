@@ -26,7 +26,7 @@ android.permissions = RECORD_AUDIO,MODIFY_AUDIO_SETTINGS,INTERNET,WAKE_LOCK
 # ── Android API ───────────────────────────────────────────────
 android.api = 34
 android.minapi = 24
-android.ndk = 25b
+android.ndk = 28c
 android.sdk = 34
 android.accept_sdk_license = True
 
