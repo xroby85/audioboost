@@ -1183,17 +1183,34 @@ class MainScreen(BoxLayout):
         self.vu.update(db)
 
 
-class AudioBoostApp(KivyApp):
+from kivy.utils import platform
+
+class AudioBoostApp(App):
     def build(self):
-        self.title = 'AudioBoost v5'
-        screen = MainScreen()
-        # Fix _cb rms attribute
-        screen._last_rms = 1e-10
-        return screen
+        self.audio_stream = None # NU pornim microfonul încă!
+        # Aici creezi restul interfeței (butoane, slidere)
+        return layout_ul_tau
 
     def on_start(self):
-        if IS_ANDROID:
-            Clock.schedule_once(lambda dt: _request_android_permissions(), 2.0)
+        # Această funcție rulează automat imediat după ce se desenează ecranul
+        if platform == 'android':
+            from android.permissions import request_permissions, Permission
+            # Cerem permisiunea și spunem aplicației ce funcție să ruleze după ce userul alege
+            request_permissions([Permission.RECORD_AUDIO], self.on_permissions_result)
+        else:
+            self.init_audio() # Pe PC pornim direct
+
+    def on_permissions_result(self, permissions, grants):
+        # Verificăm dacă utilizatorul a apăsat "Permite"
+        if all(grants):
+            self.init_audio()
+        else:
+            print("Accesul la microfon a fost refuzat!")
+
+    def init_audio(self):
+        # Abia acum e sigur să accesăm microfonul!
+        if platform == 'android':
+            self.audio_stream = AndroidAudioStream()
 
 
 def main():
