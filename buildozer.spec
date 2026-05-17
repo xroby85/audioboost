@@ -14,7 +14,7 @@ version = 5.0
 # ── Requirements ──────────────────────────────────────────────
 # ── Requirements ──────────────────────────────────────────────
 # ── Requirements ──────────────────────────────────────────────
-requirements = python3,kivy==2.3.0,numpy,scipy,pyjnius
+requirements = python3,kivy==2.3.0,numpy==1.24.3,scipy==1.10.1,pyjnius
 # Fallback fără sounddevice (dacă build pică):
 # requirements = python3==3.10.14,kivy==2.3.0,numpy,scipy
 
