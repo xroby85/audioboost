@@ -544,6 +544,27 @@ from kivy.metrics import dp, sp
 
 Window.clearcolor = (0.031, 0.031, 0.063, 1)   # #080810
 
+# ── Cerere permisiuni Android ─────────────────────────────────
+def _request_android_permissions():
+    if not IS_ANDROID:
+        return
+    try:
+        from jnius import autoclass, cast
+        PythonActivity = autoclass('org.kivy.android.PythonActivity')
+        activity = PythonActivity.mActivity
+        ContextCompat = autoclass('androidx.core.content.ContextCompat')
+        Manifest = autoclass('android.Manifest$permission')
+        permissions = [Manifest.RECORD_AUDIO, Manifest.CAMERA]
+        to_request = []
+        for perm in permissions:
+            if ContextCompat.checkSelfPermission(activity, perm) != 0:  # PERMISSION_GRANTED
+                to_request.append(perm)
+        if to_request:
+            ActivityCompat = autoclass('androidx.core.app.ActivityCompat')
+            ActivityCompat.requestPermissions(activity, to_request, 1001)
+    except Exception as e:
+        print(f"[Permissions] Eroare: {e}")
+
 # Culori
 C_ACC  = (0.878, 0.176, 0.435, 1)
 C_TEAL = (0.000, 0.831, 0.667, 1)
@@ -1059,6 +1080,7 @@ class MainScreen(BoxLayout):
 class AudioBoostApp(KivyApp):
     def build(self):
         self.title = 'AudioBoost v5'
+        Clock.schedule_once(lambda dt: _request_android_permissions(), 1.0)
         screen = MainScreen()
         # Fix _cb rms attribute
         screen._last_rms = 1e-10
