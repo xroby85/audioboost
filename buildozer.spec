@@ -24,7 +24,6 @@ android.accept_sdk_license = True
 android.archs = arm64-v8a
 
 # Foreground service type for MediaProjection
-android.add_activities = org.kivy.android.PythonActivity
 
 [buildozer]
 log_level = 2
