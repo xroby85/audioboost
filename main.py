@@ -1202,29 +1202,10 @@ class MainScreen(BoxLayout):
         self._section('DISPOZITIVE', C_BLUE)
 
         if IS_ANDROID:
-            # Android: Output device selector
-            out_row = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(6))
-            out_row.padding = [dp(8), dp(4), dp(8), dp(4)]
-            out_row.add_widget(Label(text='OUTPUT:', size_hint_x=None, width=dp(70),
-                                     font_size=sp(10), bold=True, color=C_TEAL))
-            self._out_spin = Spinner(text='Auto (Default)', values=['Auto (Default)'],
-                                     size_hint_x=1, font_size=sp(9),
-                                     background_color=(0.1, 0.1, 0.18, 1),
-                                     color=C_GOLD)
-            self._out_spin.bind(text=self._on_output_device_change)
-            out_row.add_widget(self._out_spin)
-            self._inner.add_widget(out_row)
-
-            ref_btn = Button(text='↺  Detectează dispozitive',
-                             size_hint_y=None, height=dp(36), font_size=sp(10),
-                             background_color=(0.1, 0.1, 0.18, 1), color=C_TEAL)
-            ref_btn.bind(on_press=lambda b: self._refresh_devices())
-            self._inner.add_widget(ref_btn)
-
             info = Label(
-                text='[color=f0c040]Procesare audio SYSTEM-WIDE (Spotify, YouTube, etc.)[/color]\n'
-                     'Apasă START → acordă permisiunea de captură audio.\n'
-                     'Selectează dispozitivul de ieșire (difuzor/căști).',
+                text='[color=f0c040]EQ nativ pe tot output-ul audio[/color]\n'
+                     'Apasă START pentru a activa procesarea.\n'
+                     'Funcționează cu Spotify, YouTube, jocuri, etc.',
                 size_hint_y=None, height=dp(50),
                 font_size=sp(8), color=C_DIM,
                 halign='left', valign='top', markup=True)
@@ -1268,13 +1249,8 @@ class MainScreen(BoxLayout):
         prev = self._log_lbl.text.split('\n')[:2]
         self._log_lbl.text = msg + '\n' + '\n'.join(prev)
 
-    def _on_output_device_change(self, spinner, text):
-        """Selectează dispozitivul de ieșire."""
-        pass
-
     def _refresh_devices(self):
         if IS_ANDROID:
-            self._detect_android_output_devices()
             return
         try:
             import sounddevice as sd
