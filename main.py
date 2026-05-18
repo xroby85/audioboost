@@ -241,6 +241,167 @@ class AndroidAudioStream:
         except Exception as e:
             print(f"[AndroidAudio] Eroare: {e}")
 
+
+# ══════════════════════════════════════════════════════════════
+#   ANDROID AUDIO EFFECTS — Equalizer + BassBoost nativ
+#   Procesează OUTPUT-ul audio al sistemului (nu microfonul)
+# ══════════════════════════════════════════════════════════════
+
+class AndroidAudioEffects:
+    """
+    Folosește android.media.audiofx.Equalizer + DynamicsProcessing
+    pentru a procesa audio output la nivel de sistem.
+
+    Equalizer: 5 benzi parametrice (frecvențe fixe, gain -15..+15 dB)
+    DynamicsProcessing: EQ parametric cu Q controlabil (Android 9+)
+    BassBoost: boost bass nativ
+    """
+    def __init__(self, session_id=0):
+        self._session = session_id
+        self._eq = None
+        self._dp = None
+        self._bass = None
+        self._num_bands = 0
+        self._band_freqs = []
+        self._initialized = False
+        self._dp_available = False
+
+    def init(self):
+        """Inițializează efectele audio. Apelează din thread principal."""
+        try:
+            from jnius import autoclass
+
+            # ── Equalizer (disponibil de la API 9) ──
+            Equalizer = autoclass('android.media.audiofx.Equalizer')
+            self._eq = Equalizer(0, self._session)
+            self._eq.setEnabled(True)
+
+            self._num_bands = int(self._eq.getNumberOfBands())
+            self._band_freqs = []
+            for i in range(self._num_bands):
+                freq_millihz = self._eq.getCenterFreq(i)
+                self._band_freqs.append(freq_millihz / 1000.0)  # → Hz
+
+            print(f"[AudioFX] Equalizer: {self._num_bands} benzi, freq={self._band_freqs}")
+
+            # ── BassBoost (API 9+) ──
+            try:
+                BassBoost = autoclass('android.media.audiofx.BassBoost')
+                self._bass = BassBoost(0, self._session)
+                self._bass.setEnabled(True)
+                print("[AudioFX] BassBoost: activ")
+            except Exception as e:
+                print(f"[AudioFX] BassBoost indisponibil: {e}")
+
+            # ── DynamicsProcessing (API 28+ / Android 9) — EQ cu Q controlabil ──
+            try:
+                DynamicsProcessing = autoclass('android.media.audiofx.DynamicsProcessing')
+                # Construim configurația: 5 benzi parametrice EQ
+                DynamicsProcessingConfig = autoclass('android.media.audiofx.DynamicsProcessing$Config')
+                Eq = autoclass('android.media.audiofx.DynamicsProcessing$Eq')
+                EqBand = autoclass('android.media.audiofx.DynamicsProcessing$EqBand')
+
+                # Creăm benzi EQ
+                bands = []
+                default_freqs = [80.0, 250.0, 1000.0, 4000.0, 12000.0]
+                for f in default_freqs:
+                    band = EqBand(True, 1.4, f, 0.0)
+                    bands.append(band)
+
+                # Configurație: 5 benzi pre-EQ, 0 post-EQ, fără compressor
+                eq_stage = Eq(True, 5, bands)
+                # Constructor: preferPrecorGain, eq, preEq, mbc, limiter
+                config = DynamicsProcessingConfig(
+                    True,   # preferPrecorGain
+                    eq_stage,  # eq (post-processing)
+                    None,   # preEq
+                    None,   # mbc (multi-band compressor)
+                    None    # limiter
+                )
+                self._dp = DynamicsProcessing(0, self._session, config)
+                self._dp.setEnabled(True)
+                self._dp_available = True
+                print("[AudioFX] DynamicsProcessing: activ (EQ parametric cu Q)")
+            except Exception as e:
+                print(f"[AudioFX] DynamicsProcessing indisponibil: {e}")
+                self._dp_available = False
+
+            self._initialized = True
+            return True
+
+        except Exception as e:
+            print(f"[AudioFX] Eroare inițializare: {e}")
+            return False
+
+    def set_band_gain(self, band_idx, gain_db):
+        """Setează gain-ul pentru o bandă EQ (-1500..+1500 millibel)."""
+        if not self._initialized or self._eq is None:
+            return
+        if band_idx < 0 or band_idx >= self._num_bands:
+            return
+        try:
+            mb = int(gain_db * 100)  # dB → millibel
+            # Clamp la limitele efectului
+            lo = int(self._eq.getBandLevelRange()[0])
+            hi = int(self._eq.getBandLevelRange()[1])
+            mb = max(lo, min(hi, mb))
+            self._eq.setBandLevel(band_idx, mb)
+        except Exception as e:
+            print(f"[AudioFX] set_band_gain eroare: {e}")
+
+    def set_dp_band(self, band_idx, freq, gain_db, q):
+        """Setează o bandă DynamicsProcessing (EQ parametric cu Q)."""
+        if not self._dp_available or self._dp is None:
+            return
+        if band_idx < 0 or band_idx >= 5:
+            return
+        try:
+            EqBand = autoclass('android.media.audiofx.DynamicsProcessing$EqBand')
+            band = EqBand(True, float(q), float(freq), float(gain_db))
+            # setEqBand(stage, bandIndex, band)
+            # stage: 0=pre-processing, 1=post-processing
+            self._dp.setEqBand(1, band_idx, band)
+        except Exception as e:
+            print(f"[AudioFX] set_dp_band eroare: {e}")
+
+    def set_bass_boost(self, strength_0_1000):
+        """Setează BassBoost (0..1000 millibel)."""
+        if not self._initialized or self._bass is None:
+            return
+        try:
+            settings = self._bass.getProperties()
+            # strength: 0..1000
+            s = max(0, min(1000, int(strength_0_1000)))
+            # Creăm Settings cu noua valoare
+            BassBoostSettings = autoclass('android.media.audiofx.BassBoost$Settings')
+            new_settings = BassBoostSettings(f"strength={s}")
+            self._bass.setProperties(new_settings)
+        except Exception as e:
+            print(f"[AudioFX] bass_boost eroare: {e}")
+
+    def get_band_freqs(self):
+        """Returnează frecvențele centrale ale bandelor EQ (Hz)."""
+        return list(self._band_freqs)
+
+    def get_num_bands(self):
+        return self._num_bands
+
+    def has_dynamics_processing(self):
+        return self._dp_available
+
+    def release(self):
+        """Eliberează resursele."""
+        try:
+            if self._eq: self._eq.release()
+        except: pass
+        try:
+            if self._bass: self._bass.release()
+        except: pass
+        try:
+            if self._dp: self._dp.release()
+        except: pass
+        self._initialized = False
+
 def _mc(sos, x, zi):
     ch = x.shape[1]; y = np.empty_like(x); zi_new = np.empty_like(zi)
     for c in range(ch):
@@ -977,14 +1138,12 @@ class MainScreen(BoxLayout):
         self._section('DISPOZITIVE', C_BLUE)
 
         if IS_ANDROID:
-            # Android: fără selecție dispozitive, doar info
+            # Android: info + EQ nativ
             info = Label(
-                text='[color=f0c040]Android: Microfon → DSP → Difuzor/Căști[/color]\n'
-                     'Pornește muzica pe telefon, apasă START.\n'
-                     'Sunetul trece prin microfon → DSP → ieșire.\n'
-                     '[color=e02d6f]NOTĂ: Pe Android nu se poate intercepta audio din sistem[/color]\n'
-                     '[color=e02d6f](ca pe desktop cu CABLE). Se procesează doar microfonul.[/color]',
-                size_hint_y=None, height=dp(80),
+                text='[color=f0c040]Android: EQ nativ pe OUTPUT audio (toate aplicațiile)[/color]\n'
+                     'Apasă START pentru a activa procesarea audio.\n'
+                     'Folosește Equalizer + DynamicsProcessing API.',
+                size_hint_y=None, height=dp(50),
                 font_size=sp(8), color=C_DIM,
                 halign='left', valign='top', markup=True)
             info.bind(size=info.setter('text_size'))
@@ -1122,6 +1281,12 @@ class MainScreen(BoxLayout):
     def _on_peq(self, idx):
         row = self._peq_rows[idx]
         self.dsp.update_peq(idx, row.freq, row.gain_db, row.q, row.enabled)
+        # Android: actualizează și efectele native
+        if IS_ANDROID and hasattr(self, '_fx') and self._fx:
+            if self._fx.has_dynamics_processing():
+                self._fx.set_dp_band(idx, row.freq, row.gain_db, row.q)
+            else:
+                self._fx.set_band_gain(idx, row.gain_db)
 
     # ── Start / Stop ─────────────────────────────────────────
     def _build_start_btn(self):
@@ -1149,18 +1314,37 @@ class MainScreen(BoxLayout):
             self._log('sounddevice lipsă — instalează: pip install sounddevice')
 
     def _start_android(self):
-        """Audio nativ Android prin AudioRecord/AudioTrack."""
+        """Audio nativ Android — efecte EQ pe output + procesare microfon."""
         try:
             sr = 44100; ic = CHANNELS; oc = CHANNELS
             self.dsp = RadioDSP(sr=sr, ch=ic)
             self._on_master(self._master_sl.get())
             self._on_sl()
             self._err = 0
+
+            # Inițializează efecte audio native Android (EQ pe output)
+            self._fx = AndroidAudioEffects(session_id=0)
+            fx_ok = self._fx.init()
+            if fx_ok:
+                self._log(f'▶ EQ nativ activ: {self._fx.get_num_bands()} benzi')
+                if self._fx.has_dynamics_processing():
+                    self._log('  DynamicsProcessing: EQ parametric cu Q controlabil')
+                # Aplică setările PEQ curente pe efectele native
+                for i, row in enumerate(self._peq_rows):
+                    if row.enabled and abs(row.gain_db) > 0.05:
+                        if self._fx.has_dynamics_processing():
+                            self._fx.set_dp_band(i, row.freq, row.gain_db, row.q)
+                        else:
+                            self._fx.set_band_gain(i, row.gain_db)
+            else:
+                self._log('⚠ Efecte audio native indisponibile — doar DSP procesare')
+
+            # Pornește și procesarea microfonului (opțional, pentru efecte custom)
             self.stream = AndroidAudioStream(sr, BLOCKSIZE, ic, self._cb)
             self.stream.start()
             self.running = True
             self._start_btn.text = '⏹  OPREȘTE'
-            self._log(f'▶ Android AudioRecord/AudioTrack  {sr}Hz')
+            self._log(f'▶ Audio pornit: {sr}Hz, EQ pe output')
             Clock.schedule_interval(self._vu_tick, 0.05)
         except Exception as e:
             self._log(f'EROARE Android audio: {e}')
@@ -1202,6 +1386,11 @@ class MainScreen(BoxLayout):
             try: self.stream.stop(); self.stream.close()
             except: pass
             self.stream = None
+        # Eliberează efectele Android
+        if hasattr(self, '_fx') and self._fx:
+            try: self._fx.release()
+            except: pass
+            self._fx = None
         self.running = False
         self._start_btn.text = '▶  PORNEȘTE'
         self._start_btn.state = 'normal'
