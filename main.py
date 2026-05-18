@@ -1268,6 +1268,10 @@ class MainScreen(BoxLayout):
         prev = self._log_lbl.text.split('\n')[:2]
         self._log_lbl.text = msg + '\n' + '\n'.join(prev)
 
+    def _on_output_device_change(self, spinner, text):
+        """Selectează dispozitivul de ieșire."""
+        pass
+
     def _refresh_devices(self):
         if IS_ANDROID:
             self._detect_android_output_devices()
@@ -1307,106 +1311,46 @@ class MainScreen(BoxLayout):
             AudioManager = autoclass('android.media.AudioManager')
             am = activity.getSystemService(Context.AUDIO_SERVICE)
 
-            GET_DEVICES_OUTPUTS = 2  # AudioManager.GET_DEVICES_OUTPUTS
-            devices = am.getDevices(GET_DEVICES_OUTPUTS)
+            TYPE_MAP = {
+                1: 'Earpiece', 2: 'Speaker', 3: 'Wired Headset',
+                4: 'Wired Headphones', 7: 'BT SCO', 8: 'BT A2DP',
+                13: 'USB', 14: 'USB Headset', 22: 'USB Accessory',
+            }
 
             self._android_out_devices = []
             names = ['Auto (Default)']
 
-            # Device type mapping
-            TYPE_MAP = {
-                1: 'Earpiece',
-                2: 'Speaker',
-                3: 'Wired Headset',
-                4: 'Wired Headphones',
-                7: 'Bluetooth SCO',
-                8: 'Bluetooth A2DP',
-                13: 'USB Device',
-                14: 'USB Headset',
-                22: 'USB Accessory',
-            }
+            try:
+                GET_DEVICES_OUTPUTS = 2
+                devices = am.getDevices(GET_DEVICES_OUTPUTS)
+                n = int(devices.length)
+            except Exception:
+                n = 0
 
-            for i in range(devices.length):
-                d = devices[i]
-                dtype = int(d.getType())
-                dname = d.getProductName().toString()
-                did = int(d.getId())
-                type_name = TYPE_MAP.get(dtype, f'Type {dtype}')
-                label = f'{type_name} ({dname})' if dname else type_name
-                names.append(label)
-                self._android_out_devices.append({
-                    'type': dtype, 'name': dname, 'id': did, 'label': label,
-                    'device': d
-                })
+            for i in range(n):
+                try:
+                    d = devices[i]
+                    dtype = int(d.getType())
+                    dname = str(d.getProductName())
+                    did = int(d.getId())
+                    type_name = TYPE_MAP.get(dtype, f'Type {dtype}')
+                    label = f'{type_name} ({dname})' if dname else type_name
+                    names.append(label)
+                    self._android_out_devices.append({
+                        'type': dtype, 'name': dname, 'id': did, 'label': label
+                    })
+                except Exception:
+                    pass
 
             self._out_spin.values = names
-            self._log(f'Android: {len(self._android_out_devices)} dispozitive OUT găsite')
+            self._log(f'Android: {len(self._android_out_devices)} dispozitive OUT')
         except Exception as e:
-            self._log(f'Eroare detectare dispozitive: {e}')
+            self._log(f'Dispozitive: {e}')
             self._android_out_devices = []
 
-    def _on_output_device_change(self, spinner, text):
-        """Când utilizatorul selectează un dispozitiv de ieșire."""
-        if not IS_ANDROID:
-            return
-        if text == 'Auto (Default)':
-            self._selected_output_device = None
-        elif hasattr(self, '_android_out_devices'):
-            for dev in self._android_out_devices:
-                if dev['label'] == text:
-                    self._selected_output_device = dev
-                    break
-        # Write to SharedPreferences if service is running
-        if self.running:
-            self._write_dsp_params()
-
     def _write_dsp_params(self):
-        """Scrie parametrii DSP în SharedPreferences pentru service."""
-        if not IS_ANDROID:
-            return
-        try:
-            import json
-            sv = self._dsp_sliders
-            if not sv or not hasattr(self, '_amb_wet'):
-                return
-            params = {
-                'master': self.dsp.get_master(),
-                'in_db': sv['in_db'].get(), 'bd': sv['bd'].get(),
-                'td': sv['td'].get(), 'pd': sv['pd'].get(),
-                'ex': sv['ex'].get(), 'thr': sv['thr'].get(),
-                'rat': sv['rat'].get(), 'mkup': sv['mkup'].get(),
-                'pmix': sv['pmix'].get(), 'sw': sv['sw'].get(),
-                'haas': sv['haas'].get(), 'od': sv['od'].get(),
-                'ds': sv['ds'].get(), 'up': sv['up'].get(),
-                'amb_wet': self._amb_wet.get(),
-                'amb_room': self._amb_disp.get(),
-                'amb_damp': self._amb_damp.get(),
-                'amb_pre': self._amb_pre.get(),
-                'sur_str': self._sur_sl.get(),
-            }
-            # Output device
-            if hasattr(self, '_selected_output_device') and self._selected_output_device:
-                params['output_device_id'] = self._selected_output_device['id']
-            else:
-                params['output_device_id'] = -1
-            # PEQ bands
-            peq = []
-            for row in self._peq_rows:
-                peq.append({
-                    'freq': row.freq, 'gain_db': row.gain_db,
-                    'q': row.q, 'enabled': row.enabled
-                })
-            params['peq'] = peq
-
-            from jnius import autoclass
-            PythonActivity = autoclass('org.kivy.android.PythonActivity')
-            activity = PythonActivity.mActivity
-            sp = activity.getSharedPreferences('audioboost_prefs', 0)
-            editor = sp.edit()
-            editor.putString('dsp_params', json.dumps(params))
-            editor.apply()
-        except Exception as e:
-            print(f'[IPC] Write error: {e}')
+        """No-op on Android (effects applied directly)."""
+        pass
 
     # ── DSP Sliders ─────────────────────────────────────────
     def _build_dsp_sliders(self):
@@ -1553,81 +1497,37 @@ class MainScreen(BoxLayout):
             self._log('sounddevice lipsă — instalează: pip install sounddevice')
 
     def _start_android(self):
-        """Pornește procesarea audio system-wide prin MediaProjection service."""
+        """Pornește native AudioEffects pe session 0 (procesează tot output-ul)."""
         try:
-            from jnius import autoclass
-            PythonActivity = autoclass('org.kivy.android.PythonActivity')
-            activity = PythonActivity.mActivity
-            Context = autoclass('android.content.Context')
-
-            # 1. Detectează dispozitive output
-            if not hasattr(self, '_android_out_devices'):
-                self._detect_android_output_devices()
-
-            # 2. Scrie parametrii DSP inițiali
-            self.dsp = RadioDSP(sr=44100, ch=CHANNELS)
+            sr = 44100; ic = CHANNELS
+            self.dsp = RadioDSP(sr=sr, ch=ic)
             self._on_master(self._master_sl.get())
             self._on_sl()
-            self._write_dsp_params()
+            self._err = 0
 
-            # 3. Request MediaProjection permission via startActivityForResult
-            REQUEST_CODE_MP = 1001
-
-            from android.activity import on_activity_result
-            main_self = self
-
-            def _on_mp_result(requestCode, resultCode, data):
-                if requestCode != REQUEST_CODE_MP:
-                    return
-                if resultCode == -1 and data is not None:  # RESULT_OK
-                    Clock.schedule_once(
-                        lambda dt: main_self._start_service_with_projection(
-                            resultCode, data), 0)
-                else:
-                    Clock.schedule_once(
-                        lambda dt: main_self._log(
-                            'Permisiune MediaProjection refuzată'), 0)
-                    Clock.schedule_once(
-                        lambda dt: setattr(main_self._start_btn, 'state', 'normal'), 0)
-
-            on_activity_result(REQUEST_CODE_MP, _on_mp_result)
-
-            MProjectionManager = autoclass('android.media.projection.MediaProjectionManager')
-            mp_mgr = activity.getSystemService(Context.MEDIA_PROJECTION_SERVICE)
-            intent = mp_mgr.createScreenCaptureIntent()
-            activity.startActivityForResult(intent, REQUEST_CODE_MP)
-            self._log('Aștept permisiunea MediaProjection...')
-
-        except Exception as e:
-            self._log(f'EROARE Android: {e}')
-            self._start_btn.state = 'normal'
-
-    def _start_service_with_projection(self, result_code, result_data):
-        """Pornește service-ul cu MediaProjection data."""
-        try:
-            from jnius import autoclass
-            PythonActivity = autoclass('org.kivy.android.PythonActivity')
-            activity = PythonActivity.mActivity
-            Intent = autoclass('android.content.Intent')
-            Context = autoclass('android.content.Context')
-
-            # Create intent for the service
-            service_cls = autoclass('org.audioboost.AudioBoost')
-            intent = Intent(activity, service_cls)
-            intent.putExtra('resultCode', result_code)
-            # Pass the MediaProjection result data (Intent) as Parcelable
-            intent.putExtra('resultData', result_data)
-
-            # Start foreground service
-            activity.startForegroundService(intent)
+            # Inițializează efecte audio native pe session 0 (global output)
+            self._fx = AndroidAudioEffects(session_id=0)
+            fx_ok = self._fx.init()
+            if fx_ok:
+                self._log(f'▶ EQ nativ activ: {self._fx.get_num_bands()} benzi')
+                if self._fx.has_dynamics_processing():
+                    self._log('  DynamicsProcessing: EQ parametric cu Q')
+                # Aplică PEQ curent
+                for i, row in enumerate(self._peq_rows):
+                    if row.enabled and abs(row.gain_db) > 0.05:
+                        if self._fx.has_dynamics_processing():
+                            self._fx.set_dp_band(i, row.freq, row.gain_db, row.q)
+                        else:
+                            self._fx.set_band_gain(i, row.gain_db)
+            else:
+                self._log('⚠ Efecte native indisponibile')
 
             self.running = True
             self._start_btn.text = '⏹  OPREȘTE'
-            self._log('▶ Procesare audio system-wide pornită!')
-            self._log('  Redă muzică în Spotify/YouTube pentru a auzi efectul')
-            Clock.schedule_interval(self._vu_tick, 0.5)
+            self._log('▶ Procesare audio activă!')
+            self._log('  Redă muzică în orice aplicație')
         except Exception as e:
-            self._log(f'EROARE pornire service: {e}')
+            self._log(f'EROARE Android: {e}')
             self._start_btn.state = 'normal'
 
     def _start_desktop(self):
@@ -1662,31 +1562,21 @@ class MainScreen(BoxLayout):
 
     def _stop(self):
         Clock.unschedule(self._vu_tick)
-        if IS_ANDROID:
-            self._stop_android()
-        else:
+        if not IS_ANDROID:
             if self.stream:
                 try: self.stream.stop(); self.stream.close()
                 except: pass
                 self.stream = None
+        # Eliberează efectele Android
+        if hasattr(self, '_fx') and self._fx:
+            try: self._fx.release()
+            except: pass
+            self._fx = None
         self.running = False
         self._start_btn.text = '▶  PORNEȘTE'
         self._start_btn.state = 'normal'
         self.vu.update(-60)
         self._log('⏸ Oprit.')
-
-    def _stop_android(self):
-        """Oprește service-ul Android."""
-        try:
-            from jnius import autoclass
-            PythonActivity = autoclass('org.kivy.android.PythonActivity')
-            activity = PythonActivity.mActivity
-            Intent = autoclass('android.content.Intent')
-            service_cls = autoclass('org.audioboost.AudioBoost')
-            intent = Intent(activity, service_cls)
-            activity.stopService(intent)
-        except Exception as e:
-            self._log(f'Eroare oprire service: {e}')
 
     def _cb(self, indata, outdata, frames, time_info, status):
         try:
