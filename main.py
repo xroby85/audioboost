@@ -176,6 +176,8 @@ class AndroidAudioStream:
         self.sr = sr; self.bs = blocksize
         self.ch = channels; self._cb = callback
         self._running = False; self._thread = None
+        self._rec_session = 0
+        self._trk = None
 
     def start(self):
         self._running = True
@@ -212,7 +214,18 @@ class AndroidAudioStream:
                              ch_out, enc, buf_sz_out,
                              AudioTrack.MODE_STREAM)
             rec.startRecording(); trk.play()
-            print(f"[AndroidAudio] Pornit: {self.sr}Hz, {self.ch}ch, block={self.bs}")
+
+            # Store session IDs for effects init
+            try:
+                self._rec_session = int(rec.getAudioSessionId())
+            except Exception:
+                self._rec_session = 0
+            try:
+                self._trk = trk
+            except Exception:
+                pass
+
+            print(f"[AndroidAudio] Pornit: {self.sr}Hz, {self.ch}ch, block={self.bs}, session={self._rec_session}")
 
             import array as arr
             n_samples = self.bs * self.ch
@@ -267,71 +280,64 @@ class AndroidAudioEffects:
         self._dp_available = False
 
     def init(self):
-        """Inițializează efectele audio. Apelează din thread principal."""
+        """Inițializează efectele audio. Fiecare efect are try-except separat."""
         try:
             from jnius import autoclass
+        except Exception as e:
+            print(f"[AudioFX] jnius indisponibil: {e}")
+            return False
 
-            # ── Equalizer (disponibil de la API 9) ──
+        any_ok = False
+
+        # ── Equalizer (disponibil de la API 9) ──
+        try:
             Equalizer = autoclass('android.media.audiofx.Equalizer')
             self._eq = Equalizer(0, self._session)
             self._eq.setEnabled(True)
-
             self._num_bands = int(self._eq.getNumberOfBands())
             self._band_freqs = []
             for i in range(self._num_bands):
                 freq_millihz = self._eq.getCenterFreq(i)
-                self._band_freqs.append(freq_millihz / 1000.0)  # → Hz
-
+                self._band_freqs.append(freq_millihz / 1000.0)
             print(f"[AudioFX] Equalizer: {self._num_bands} benzi, freq={self._band_freqs}")
-
-            # ── BassBoost (API 9+) ──
-            try:
-                BassBoost = autoclass('android.media.audiofx.BassBoost')
-                self._bass = BassBoost(0, self._session)
-                self._bass.setEnabled(True)
-                print("[AudioFX] BassBoost: activ")
-            except Exception as e:
-                print(f"[AudioFX] BassBoost indisponibil: {e}")
-
-            # ── DynamicsProcessing (API 28+ / Android 9) — EQ cu Q controlabil ──
-            try:
-                DynamicsProcessing = autoclass('android.media.audiofx.DynamicsProcessing')
-                # Construim configurația: 5 benzi parametrice EQ
-                DynamicsProcessingConfig = autoclass('android.media.audiofx.DynamicsProcessing$Config')
-                Eq = autoclass('android.media.audiofx.DynamicsProcessing$Eq')
-                EqBand = autoclass('android.media.audiofx.DynamicsProcessing$EqBand')
-
-                # Creăm benzi EQ
-                bands = []
-                default_freqs = [80.0, 250.0, 1000.0, 4000.0, 12000.0]
-                for f in default_freqs:
-                    band = EqBand(True, 1.4, f, 0.0)
-                    bands.append(band)
-
-                # Configurație: 5 benzi pre-EQ, 0 post-EQ, fără compressor
-                eq_stage = Eq(True, 5, bands)
-                # Constructor: preferPrecorGain, eq, preEq, mbc, limiter
-                config = DynamicsProcessingConfig(
-                    True,   # preferPrecorGain
-                    eq_stage,  # eq (post-processing)
-                    None,   # preEq
-                    None,   # mbc (multi-band compressor)
-                    None    # limiter
-                )
-                self._dp = DynamicsProcessing(0, self._session, config)
-                self._dp.setEnabled(True)
-                self._dp_available = True
-                print("[AudioFX] DynamicsProcessing: activ (EQ parametric cu Q)")
-            except Exception as e:
-                print(f"[AudioFX] DynamicsProcessing indisponibil: {e}")
-                self._dp_available = False
-
-            self._initialized = True
-            return True
-
+            any_ok = True
         except Exception as e:
-            print(f"[AudioFX] Eroare inițializare: {e}")
-            return False
+            print(f"[AudioFX] Equalizer indisponibil: {e}")
+
+        # ── BassBoost (API 9+) ──
+        try:
+            BassBoost = autoclass('android.media.audiofx.BassBoost')
+            self._bass = BassBoost(0, self._session)
+            self._bass.setEnabled(True)
+            print("[AudioFX] BassBoost: activ")
+            any_ok = True
+        except Exception as e:
+            print(f"[AudioFX] BassBoost indisponibil: {e}")
+
+        # ── DynamicsProcessing (API 28+ / Android 9) — EQ cu Q controlabil ──
+        try:
+            DynamicsProcessing = autoclass('android.media.audiofx.DynamicsProcessing')
+            DynamicsProcessingConfig = autoclass('android.media.audiofx.DynamicsProcessing$Config')
+            Eq = autoclass('android.media.audiofx.DynamicsProcessing$Eq')
+            EqBand = autoclass('android.media.audiofx.DynamicsProcessing$EqBand')
+            bands = []
+            default_freqs = [80.0, 250.0, 1000.0, 4000.0, 12000.0]
+            for f in default_freqs:
+                band = EqBand(True, 1.4, f, 0.0)
+                bands.append(band)
+            eq_stage = Eq(True, 5, bands)
+            config = DynamicsProcessingConfig(True, eq_stage, None, None, None)
+            self._dp = DynamicsProcessing(0, self._session, config)
+            self._dp.setEnabled(True)
+            self._dp_available = True
+            print("[AudioFX] DynamicsProcessing: activ (EQ parametric cu Q)")
+            any_ok = True
+        except Exception as e:
+            print(f"[AudioFX] DynamicsProcessing indisponibil: {e}")
+            self._dp_available = False
+
+        self._initialized = any_ok
+        return any_ok
 
     def set_band_gain(self, band_idx, gain_db):
         """Setează gain-ul pentru o bandă EQ (-1500..+1500 millibel)."""
@@ -356,6 +362,7 @@ class AndroidAudioEffects:
         if band_idx < 0 or band_idx >= 5:
             return
         try:
+            from jnius import autoclass
             EqBand = autoclass('android.media.audiofx.DynamicsProcessing$EqBand')
             band = EqBand(True, float(q), float(freq), float(gain_db))
             # setEqBand(stage, bandIndex, band)
@@ -822,6 +829,59 @@ PRESETS = {
     "Flat":        dict(in_db=0,bd=0,  td=0,  pd=0,  ex=0.00,thr=-10,rat=1,mkup=0, pmix=0.00,sw=1.00,haas=0, od=0.0, ds=0.0,up=0.00,amb_wet=0.0,amb_room=0.50,sur_str=0.0),
 }
 
+# ── EQ Presets (5 benzi parametrice) — identice cu PC ────────
+EQ_PRESETS = {
+    "Dance / House": [
+        (  60.0,  +4.5, 1.5, True),
+        ( 250.0,  -2.5, 2.0, True),
+        ( 800.0,  -1.0, 1.5, True),
+        (3000.0,  +2.0, 1.4, True),
+        (10000.0, +3.5, 1.2, True),
+    ],
+    "Pop": [
+        ( 80.0,  +1.5, 1.2, True),
+        ( 250.0, -1.0, 1.4, True),
+        (1000.0, +2.5, 1.0, True),
+        (3500.0, +1.5, 1.4, True),
+        (12000.0, +1.0, 1.0, True),
+    ],
+    "Gaming / 3D": [
+        ( 100.0, +3.0, 1.0, True),
+        ( 400.0, -2.0, 1.4, True),
+        (1500.0, +1.5, 1.2, True),
+        (4500.0, +3.5, 2.5, True),
+        (12000.0, +2.0, 1.0, True),
+    ],
+    "Vocal / Podcast": [
+        ( 80.0,  -4.0, 1.0, True),
+        ( 200.0, +1.5, 1.2, True),
+        (1200.0, +2.0, 1.5, True),
+        (5000.0, +1.0, 1.4, True),
+        (10000.0,-1.5, 1.0, True),
+    ],
+    "Rock FM": [
+        (  80.0, +3.0, 1.2, True),
+        ( 250.0, -1.5, 1.6, True),
+        ( 800.0, -1.0, 1.5, True),
+        (3500.0, +2.5, 1.2, True),
+        (12000.0, +3.0, 1.0, True),
+    ],
+    "Bass Club": [
+        (  60.0, +6.0, 1.2, True),
+        ( 150.0, +3.0, 1.5, True),
+        ( 500.0, -3.0, 2.0, True),
+        (3000.0, +1.0, 1.4, True),
+        (10000.0, +2.0, 1.0, True),
+    ],
+    "Flat (Reset)": [
+        ( 80.0,   0.0, 1.4, False),
+        ( 250.0,  0.0, 1.4, False),
+        (1000.0,  0.0, 1.4, False),
+        (4000.0,  0.0, 1.4, False),
+        (12000.0, 0.0, 1.4, False),
+    ],
+}
+
 # ══════════════════════════════════════════════════════════════
 #   KIVY UI
 # ══════════════════════════════════════════════════════════════
@@ -844,8 +904,6 @@ from kivy.metrics import dp, sp
 Window.clearcolor = (0.031, 0.031, 0.063, 1)   # #080810
 
 # ── Cerere permisiuni Android ─────────────────────────────────
-MEDIA_PROJECTION_REQUEST_CODE = 1002
-
 def _request_android_permissions():
     if not IS_ANDROID:
         return
@@ -853,10 +911,7 @@ def _request_android_permissions():
         from jnius import autoclass
         PythonActivity = autoclass('org.kivy.android.PythonActivity')
         activity = PythonActivity.mActivity
-        perms = [
-            "android.permission.FOREGROUND_SERVICE",
-            "android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION",
-        ]
+        perms = ["android.permission.RECORD_AUDIO"]
         to_req = []
         for p in perms:
             try:
@@ -1129,9 +1184,6 @@ class MainScreen(BoxLayout):
 
     def _load_preset(self, name):
         p = PRESETS[name]
-        if IS_ANDROID:
-            self._log(f'Preset: {name} (EQ nativ)')
-            return
         for key, sl in self._dsp_sliders.items():
             if key in p:
                 sl.set(p[key])
@@ -1225,17 +1277,6 @@ class MainScreen(BoxLayout):
 
     # ── DSP Sliders ─────────────────────────────────────────
     def _build_dsp_sliders(self):
-        if IS_ANDROID:
-            # Android: doar BassBoost nativ + info
-            self._section('BASS BOOST (nativ Android)', C_GOLD)
-            self._bass_sl = DSPSlider('BASS BOOST', 0, 1000, 0,
-                                      unit='', color=C_GOLD,
-                                      callback=self._on_bass_boost)
-            self._inner.add_widget(self._bass_sl)
-            # DSP sliders dummy (necesari pentru _on_sl dar invizibili)
-            self._dsp_sliders = {}
-            return
-
         self._section('PROCESARE DSP', C_TEAL)
         sliders_def = [
             ('in_db', 'TRIM INTRARE',  -12,  12,   'dB',   0.0,  C_TEAL),
@@ -1260,14 +1301,12 @@ class MainScreen(BoxLayout):
             self._inner.add_widget(sl)
             self._dsp_sliders[key] = sl
 
-    def _on_bass_boost(self, val):
-        if hasattr(self, '_fx') and self._fx:
-            self._fx.set_bass_boost(val)
-
     def _on_sl(self):
         sv = self._dsp_sliders
         if not sv:
-            return  # Android fără DSP sliders
+            return
+        if not hasattr(self, '_amb_wet'):
+            return  # Ambience sliders not built yet
         self.dsp.update(
             sv['in_db'].get(), sv['bd'].get(), sv['td'].get(),
             sv['pd'].get(),    sv['ex'].get(), sv['thr'].get(),
@@ -1281,28 +1320,34 @@ class MainScreen(BoxLayout):
 
     # ── Ambience + 3D ────────────────────────────────────────
     def _build_ambience(self):
-        if not IS_ANDROID:
-            self._section('AMBIENCE + 3D SURROUND', C_BLUE)
-            self._amb_wet  = DSPSlider('AMBIENCE',     0.0, 1.0,  0.0, callback=lambda v: self._on_sl())
-            self._amb_disp = DSPSlider('ROOM SIZE',    0.1, 0.9,  0.5, callback=lambda v: self._on_sl())
-            self._amb_damp = DSPSlider('DAMPING',      0.0, 1.0, 0.45, callback=lambda v: self._on_sl())
-            self._amb_pre  = DSPSlider('PRE-DELAY ms', 0.0,40.0, 15.0, unit='ms', callback=lambda v: self._on_sl())
-            self._sur_sl   = DSPSlider('3D SURROUND',  0.0, 1.0,  0.0, callback=lambda v: self._on_sl())
-            for w in [self._amb_wet, self._amb_disp, self._amb_damp, self._amb_pre, self._sur_sl]:
-                self._inner.add_widget(w)
-        else:
-            # Android: sliders dummy pentru _on_sl
-            self._amb_wet  = type('S', (), {'get': lambda s: 0.0})()
-            self._amb_disp = type('S', (), {'get': lambda s: 0.5})()
-            self._amb_damp = type('S', (), {'get': lambda s: 0.45})()
-            self._amb_pre  = type('S', (), {'get': lambda s: 15.0})()
-            self._sur_sl   = type('S', (), {'get': lambda s: 0.0})()
+        self._section('AMBIENCE + 3D SURROUND', C_BLUE)
+        self._amb_wet  = DSPSlider('AMBIENCE',     0.0, 1.0,  0.0, callback=lambda v: self._on_sl())
+        self._amb_disp = DSPSlider('ROOM SIZE',    0.1, 0.9,  0.5, callback=lambda v: self._on_sl())
+        self._amb_damp = DSPSlider('DAMPING',      0.0, 1.0, 0.45, callback=lambda v: self._on_sl())
+        self._amb_pre  = DSPSlider('PRE-DELAY ms', 0.0,40.0, 15.0, unit='ms', callback=lambda v: self._on_sl())
+        self._sur_sl   = DSPSlider('3D SURROUND',  0.0, 1.0,  0.0, callback=lambda v: self._on_sl())
+        for w in [self._amb_wet, self._amb_disp, self._amb_damp, self._amb_pre, self._sur_sl]:
+            self._inner.add_widget(w)
 
         # ── Parametric EQ 5 benzi ─────────────────────────────
-        if IS_ANDROID:
-            self._section('PARAMETRIC EQ  (5 benzi — nativ Android)', C_GOLD)
-        else:
-            self._section('PARAMETRIC EQ  (5 benzi)', C_GOLD)
+        self._section('PARAMETRIC EQ  (5 benzi)', C_GOLD)
+
+        # EQ Preset dropdown
+        eq_row = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(6))
+        eq_row.padding = [dp(8), dp(4), dp(8), dp(4)]
+        eq_row.add_widget(Label(text='PRESET:', size_hint_x=None, width=dp(70),
+                                font_size=sp(10), bold=True, color=C_TEAL,
+                                halign='left', valign='middle'))
+        self._eq_spinner = Spinner(
+            text='Flat (Reset)',
+            values=list(EQ_PRESETS.keys()),
+            size_hint_x=1, font_size=sp(10),
+            background_color=(0.1, 0.1, 0.18, 1),
+            color=C_GOLD)
+        self._eq_spinner.bind(text=self._on_eq_preset)
+        eq_row.add_widget(self._eq_spinner)
+        self._inner.add_widget(eq_row)
+
         PEQ_DEFS = [
             ('Low',      80.0),  ('Low-Mid', 250.0),
             ('Mid',    1000.0),  ('High-Mid',4000.0),
@@ -1323,6 +1368,36 @@ class MainScreen(BoxLayout):
                 self._fx.set_dp_band(idx, row.freq, row.gain_db, row.q)
             else:
                 self._fx.set_band_gain(idx, row.gain_db)
+
+    def _on_eq_preset(self, spinner, text):
+        """Aplică un preset EQ pe cele 5 benzi parametrice."""
+        if text not in EQ_PRESETS:
+            return
+        settings = EQ_PRESETS[text]
+        for i, (freq, gain, q, enabled) in enumerate(settings):
+            if i < len(self._peq_rows):
+                row = self._peq_rows[i]
+                row._sl_freq.value = freq
+                row._sl_gain_db.value = gain
+                row._sl_q.value = q
+                if enabled != row.enabled:
+                    row._tog(row._on_btn)
+                row.freq = freq
+                row.gain_db = gain
+                row.q = q
+                row.enabled = enabled
+                # Update labels
+                row._lv_freq.text = f'{freq:.0f}Hz'
+                row._lv_gain_db.text = f'{gain:+.1f}dB'
+                row._lv_q.text = f'Q{q:.1f}'
+                # Update DSP
+                self.dsp.update_peq(i, freq, gain, q, enabled)
+                if IS_ANDROID and hasattr(self, '_fx') and self._fx:
+                    if self._fx.has_dynamics_processing():
+                        self._fx.set_dp_band(i, freq, gain, q)
+                    else:
+                        self._fx.set_band_gain(i, gain)
+        self._log(f'EQ Preset: {text}')
 
     # ── Start / Stop ─────────────────────────────────────────
     def _build_start_btn(self):
@@ -1350,64 +1425,46 @@ class MainScreen(BoxLayout):
             self._log('sounddevice lipsă — instalează: pip install sounddevice')
 
     def _start_android(self):
-        """Cere MediaProjection permission → pornește service de procesare audio."""
+        """Audio nativ Android — efecte EQ pe output + procesare microfon."""
         try:
-            from jnius import autoclass
-            PythonActivity = autoclass('org.kivy.android.PythonActivity')
-            activity = PythonActivity.mActivity
-            MProjectionManager = autoclass('android.media.projection.MediaProjectionManager')
-            mp_mgr = activity.getSystemService('media_projection')
-            intent = mp_mgr.createScreenCaptureIntent()
-            activity.startActivityForResult(intent, MEDIA_PROJECTION_REQUEST_CODE)
-            self._log('▶ Se cere permisiunea de captură audio...')
-        except Exception as e:
-            self._log(f'EROARE MediaProjection: {e}')
-            self._start_btn.state = 'normal'
+            sr = 44100; ic = CHANNELS; oc = CHANNELS
+            self.dsp = RadioDSP(sr=sr, ch=ic)
+            self._on_master(self._master_sl.get())
+            self._on_sl()
+            self._err = 0
 
-    def _on_media_projection_result(self, result_code, result_data):
-        """Apelat când utilizatorul acceptă/respinge MediaProjection."""
-        if result_code != -1:  # -1 = RESULT_OK
-            self._log('Permisiune MediaProjection respinsă.')
-            self._start_btn.state = 'normal'
-            return
-        self._start_audio_service(result_code, result_data)
+            # Pornește streamul audio (creează AudioRecord + AudioTrack)
+            self.stream = AndroidAudioStream(sr, BLOCKSIZE, ic, self._cb)
+            self.stream.start()
 
-    def _start_audio_service(self, result_code, result_data):
-        """Pornește serviciul de procesare audio."""
-        try:
-            from jnius import autoclass
-            PythonActivity = autoclass('org.kivy.android.PythonActivity')
-            activity = PythonActivity.mActivity
-            Intent = autoclass('android.content.Intent')
-            Context = autoclass('android.content.Context')
-
-            service_intent = Intent(activity, autoclass('org.audioboost.AudioBoost'))
-            service_intent.putExtra('resultCode', result_code)
-            service_intent.putExtra('resultData', result_data)
-
-            if hasattr(activity, 'startForegroundService'):
-                activity.startForegroundService(service_intent)
+            # Inițializează efectele DUPĂ ce streamul pornește
+            # (AudioTrack trebuie să existe pentru session ID corect)
+            import time as _t
+            _t.sleep(0.3)  # Lasă AudioTrack-ul să se inițializeze
+            session_id = self.stream._rec_session
+            self._fx = AndroidAudioEffects(session_id=session_id)
+            fx_ok = self._fx.init()
+            if fx_ok:
+                self._log(f'▶ EQ nativ activ: {self._fx.get_num_bands()} benzi (session={session_id})')
+                if self._fx.has_dynamics_processing():
+                    self._log('  DynamicsProcessing: EQ parametric cu Q controlabil')
+                # Aplică setările PEQ curente pe efectele native
+                for i, row in enumerate(self._peq_rows):
+                    if row.enabled and abs(row.gain_db) > 0.05:
+                        if self._fx.has_dynamics_processing():
+                            self._fx.set_dp_band(i, row.freq, row.gain_db, row.q)
+                        else:
+                            self._fx.set_band_gain(i, row.gain_db)
             else:
-                activity.startService(service_intent)
+                self._log('⚠ Efecte audio native indisponibile — doar DSP procesare')
 
             self.running = True
             self._start_btn.text = '⏹  OPREȘTE'
-            self._log('▶ Audio processing activ — tot audio sistemul trece prin DSP')
+            self._log(f'▶ Audio pornit: {sr}Hz, DSP + EQ nativ')
+            Clock.schedule_interval(self._vu_tick, 0.05)
         except Exception as e:
-            self._log(f'EROARE service: {e}')
+            self._log(f'EROARE Android audio: {e}')
             self._start_btn.state = 'normal'
-
-    def _stop_android_service(self):
-        """Oprește serviciul de procesare audio."""
-        try:
-            from jnius import autoclass
-            PythonActivity = autoclass('org.kivy.android.PythonActivity')
-            activity = PythonActivity.mActivity
-            Intent = autoclass('android.content.Intent')
-            service_intent = Intent(activity, autoclass('org.audioboost.AudioBoost'))
-            activity.stopService(service_intent)
-        except Exception as e:
-            self._log(f'EROARE oprire service: {e}')
 
     def _start_desktop(self):
         """Audio desktop prin sounddevice."""
@@ -1441,12 +1498,11 @@ class MainScreen(BoxLayout):
 
     def _stop(self):
         Clock.unschedule(self._vu_tick)
-        if IS_ANDROID:
-            self._stop_android_service()
         if self.stream:
             try: self.stream.stop(); self.stream.close()
             except: pass
             self.stream = None
+        # Eliberează efectele Android
         if hasattr(self, '_fx') and self._fx:
             try: self._fx.release()
             except: pass
@@ -1483,27 +1539,13 @@ class AudioBoostApp(KivyApp):
     def build(self):
         self.title = 'AudioBoost v5'
         screen = MainScreen()
+        # Fix _cb rms attribute
         screen._last_rms = 1e-10
-        self._screen = screen
         return screen
 
     def on_start(self):
         if IS_ANDROID:
             Clock.schedule_once(lambda dt: _request_android_permissions(), 2.0)
-            Clock.schedule_once(lambda dt: self._bind_activity_result(), 3.0)
-
-    def _bind_activity_result(self):
-        """Bind la onActivityResult pentru MediaProjection."""
-        try:
-            from jnius import autoclass
-            from android import activity
-            activity.bind(on_activity_result=self._on_activity_result)
-        except Exception as e:
-            print(f"[AudioBoost] activity bind: {e}")
-
-    def _on_activity_result(self, requestCode, resultCode, data):
-        if requestCode == MEDIA_PROJECTION_REQUEST_CODE:
-            self._screen._on_media_projection_result(resultCode, data)
 
 
 def main():
@@ -1522,4 +1564,48 @@ def main():
         except:
             pass
         try:
-            from kivy.app import App as 
+            from kivy.app import App as _A
+            from kivy.uix.label import Label
+            from kivy.uix.boxlayout import BoxLayout
+            from kivy.core.window import Window
+            class ErrApp(_A):
+                def build(self):
+                    self.title = 'AudioBoost - EROARE'
+                    Window.clearcolor = (0.03, 0.03, 0.06, 1)
+                    bl = BoxLayout(orientation='vertical', padding=20)
+                    bl.add_widget(Label(
+                        text=f'EROARE:\\n{e}\\n\\n{tb[-500:]}',
+                        font_size='12sp', halign='left', valign='top',
+                        color=(1, 0.3, 0.3, 1), text_size=(Window.width-40, None)))
+                    return bl
+            ErrApp().run()
+        except:
+            pass
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except ImportError as e:
+        # Eroare de import — logcat + ecran de eroare
+        import traceback, sys
+        tb = traceback.format_exc()
+        print(f"[IMPORT ERROR] {tb}")
+        try:
+            from kivy.app import App as _A
+            from kivy.uix.label import Label
+            from kivy.uix.boxlayout import BoxLayout
+            from kivy.core.window import Window
+            class ErrApp(_A):
+                def build(self):
+                    self.title = 'AudioBoost - Eroare Import'
+                    Window.clearcolor = (0.03, 0.03, 0.06, 1)
+                    bl = BoxLayout(orientation='vertical', padding=20)
+                    bl.add_widget(Label(
+                        text=f'Eroare import:\\n{e}\\n\\n{tb[-800:]}',
+                        font_size='12sp', halign='left', valign='top',
+                        color=(1, 0.3, 0.3, 1), text_size=(Window.width-40, None)))
+                    return bl
+            ErrApp().run()
+        except:
+            sys.exit(1)
