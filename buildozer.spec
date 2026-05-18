@@ -4,11 +4,13 @@ package.name = audioboost
 package.domain = org.audioboost
 
 source.dir = .
+source.main = main.py
 source.include_exts = py,png,jpg,kv,atlas
 
 version = 5.0
 
-requirements = python3,cython==3.0.11,kivy==https://github.com/kivy/kivy/archive/refs/tags/2.3.0.zip,numpy==1.24.3,scipy==1.10.1,pyjnius
+requirements = python3,kivy==2.3.1,numpy
+
 orientation = portrait
 fullscreen = 0
 
