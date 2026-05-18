@@ -844,6 +844,8 @@ from kivy.metrics import dp, sp
 Window.clearcolor = (0.031, 0.031, 0.063, 1)   # #080810
 
 # ── Cerere permisiuni Android ─────────────────────────────────
+MEDIA_PROJECTION_REQUEST_CODE = 1002
+
 def _request_android_permissions():
     if not IS_ANDROID:
         return
@@ -851,7 +853,10 @@ def _request_android_permissions():
         from jnius import autoclass
         PythonActivity = autoclass('org.kivy.android.PythonActivity')
         activity = PythonActivity.mActivity
-        perms = ["android.permission.RECORD_AUDIO"]
+        perms = [
+            "android.permission.FOREGROUND_SERVICE",
+            "android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION",
+        ]
         to_req = []
         for p in perms:
             try:
@@ -1124,6 +1129,9 @@ class MainScreen(BoxLayout):
 
     def _load_preset(self, name):
         p = PRESETS[name]
+        if IS_ANDROID:
+            self._log(f'Preset: {name} (EQ nativ)')
+            return
         for key, sl in self._dsp_sliders.items():
             if key in p:
                 sl.set(p[key])
@@ -1217,6 +1225,17 @@ class MainScreen(BoxLayout):
 
     # ── DSP Sliders ─────────────────────────────────────────
     def _build_dsp_sliders(self):
+        if IS_ANDROID:
+            # Android: doar BassBoost nativ + info
+            self._section('BASS BOOST (nativ Android)', C_GOLD)
+            self._bass_sl = DSPSlider('BASS BOOST', 0, 1000, 0,
+                                      unit='', color=C_GOLD,
+                                      callback=self._on_bass_boost)
+            self._inner.add_widget(self._bass_sl)
+            # DSP sliders dummy (necesari pentru _on_sl dar invizibili)
+            self._dsp_sliders = {}
+            return
+
         self._section('PROCESARE DSP', C_TEAL)
         sliders_def = [
             ('in_db', 'TRIM INTRARE',  -12,  12,   'dB',   0.0,  C_TEAL),
@@ -1241,8 +1260,14 @@ class MainScreen(BoxLayout):
             self._inner.add_widget(sl)
             self._dsp_sliders[key] = sl
 
+    def _on_bass_boost(self, val):
+        if hasattr(self, '_fx') and self._fx:
+            self._fx.set_bass_boost(val)
+
     def _on_sl(self):
         sv = self._dsp_sliders
+        if not sv:
+            return  # Android fără DSP sliders
         self.dsp.update(
             sv['in_db'].get(), sv['bd'].get(), sv['td'].get(),
             sv['pd'].get(),    sv['ex'].get(), sv['thr'].get(),
@@ -1256,17 +1281,28 @@ class MainScreen(BoxLayout):
 
     # ── Ambience + 3D ────────────────────────────────────────
     def _build_ambience(self):
-        self._section('AMBIENCE + 3D SURROUND', C_BLUE)
-        self._amb_wet  = DSPSlider('AMBIENCE',     0.0, 1.0,  0.0, callback=lambda v: self._on_sl())
-        self._amb_disp = DSPSlider('ROOM SIZE',    0.1, 0.9,  0.5, callback=lambda v: self._on_sl())
-        self._amb_damp = DSPSlider('DAMPING',      0.0, 1.0, 0.45, callback=lambda v: self._on_sl())
-        self._amb_pre  = DSPSlider('PRE-DELAY ms', 0.0,40.0, 15.0, unit='ms', callback=lambda v: self._on_sl())
-        self._sur_sl   = DSPSlider('3D SURROUND',  0.0, 1.0,  0.0, callback=lambda v: self._on_sl())
-        for w in [self._amb_wet, self._amb_disp, self._amb_damp, self._amb_pre, self._sur_sl]:
-            self._inner.add_widget(w)
+        if not IS_ANDROID:
+            self._section('AMBIENCE + 3D SURROUND', C_BLUE)
+            self._amb_wet  = DSPSlider('AMBIENCE',     0.0, 1.0,  0.0, callback=lambda v: self._on_sl())
+            self._amb_disp = DSPSlider('ROOM SIZE',    0.1, 0.9,  0.5, callback=lambda v: self._on_sl())
+            self._amb_damp = DSPSlider('DAMPING',      0.0, 1.0, 0.45, callback=lambda v: self._on_sl())
+            self._amb_pre  = DSPSlider('PRE-DELAY ms', 0.0,40.0, 15.0, unit='ms', callback=lambda v: self._on_sl())
+            self._sur_sl   = DSPSlider('3D SURROUND',  0.0, 1.0,  0.0, callback=lambda v: self._on_sl())
+            for w in [self._amb_wet, self._amb_disp, self._amb_damp, self._amb_pre, self._sur_sl]:
+                self._inner.add_widget(w)
+        else:
+            # Android: sliders dummy pentru _on_sl
+            self._amb_wet  = type('S', (), {'get': lambda s: 0.0})()
+            self._amb_disp = type('S', (), {'get': lambda s: 0.5})()
+            self._amb_damp = type('S', (), {'get': lambda s: 0.45})()
+            self._amb_pre  = type('S', (), {'get': lambda s: 15.0})()
+            self._sur_sl   = type('S', (), {'get': lambda s: 0.0})()
 
         # ── Parametric EQ 5 benzi ─────────────────────────────
-        self._section('PARAMETRIC EQ  (5 benzi)', C_GOLD)
+        if IS_ANDROID:
+            self._section('PARAMETRIC EQ  (5 benzi — nativ Android)', C_GOLD)
+        else:
+            self._section('PARAMETRIC EQ  (5 benzi)', C_GOLD)
         PEQ_DEFS = [
             ('Low',      80.0),  ('Low-Mid', 250.0),
             ('Mid',    1000.0),  ('High-Mid',4000.0),
@@ -1314,41 +1350,64 @@ class MainScreen(BoxLayout):
             self._log('sounddevice lipsă — instalează: pip install sounddevice')
 
     def _start_android(self):
-        """Audio nativ Android — efecte EQ pe output + procesare microfon."""
+        """Cere MediaProjection permission → pornește service de procesare audio."""
         try:
-            sr = 44100; ic = CHANNELS; oc = CHANNELS
-            self.dsp = RadioDSP(sr=sr, ch=ic)
-            self._on_master(self._master_sl.get())
-            self._on_sl()
-            self._err = 0
+            from jnius import autoclass
+            PythonActivity = autoclass('org.kivy.android.PythonActivity')
+            activity = PythonActivity.mActivity
+            MProjectionManager = autoclass('android.media.projection.MediaProjectionManager')
+            mp_mgr = activity.getSystemService('media_projection')
+            intent = mp_mgr.createScreenCaptureIntent()
+            activity.startActivityForResult(intent, MEDIA_PROJECTION_REQUEST_CODE)
+            self._log('▶ Se cere permisiunea de captură audio...')
+        except Exception as e:
+            self._log(f'EROARE MediaProjection: {e}')
+            self._start_btn.state = 'normal'
 
-            # Inițializează efecte audio native Android (EQ pe output)
-            self._fx = AndroidAudioEffects(session_id=0)
-            fx_ok = self._fx.init()
-            if fx_ok:
-                self._log(f'▶ EQ nativ activ: {self._fx.get_num_bands()} benzi')
-                if self._fx.has_dynamics_processing():
-                    self._log('  DynamicsProcessing: EQ parametric cu Q controlabil')
-                # Aplică setările PEQ curente pe efectele native
-                for i, row in enumerate(self._peq_rows):
-                    if row.enabled and abs(row.gain_db) > 0.05:
-                        if self._fx.has_dynamics_processing():
-                            self._fx.set_dp_band(i, row.freq, row.gain_db, row.q)
-                        else:
-                            self._fx.set_band_gain(i, row.gain_db)
+    def _on_media_projection_result(self, result_code, result_data):
+        """Apelat când utilizatorul acceptă/respinge MediaProjection."""
+        if result_code != -1:  # -1 = RESULT_OK
+            self._log('Permisiune MediaProjection respinsă.')
+            self._start_btn.state = 'normal'
+            return
+        self._start_audio_service(result_code, result_data)
+
+    def _start_audio_service(self, result_code, result_data):
+        """Pornește serviciul de procesare audio."""
+        try:
+            from jnius import autoclass
+            PythonActivity = autoclass('org.kivy.android.PythonActivity')
+            activity = PythonActivity.mActivity
+            Intent = autoclass('android.content.Intent')
+            Context = autoclass('android.content.Context')
+
+            service_intent = Intent(activity, autoclass('org.audioboost.AudioBoost'))
+            service_intent.putExtra('resultCode', result_code)
+            service_intent.putExtra('resultData', result_data)
+
+            if hasattr(activity, 'startForegroundService'):
+                activity.startForegroundService(service_intent)
             else:
-                self._log('⚠ Efecte audio native indisponibile — doar DSP procesare')
+                activity.startService(service_intent)
 
-            # Pornește și procesarea microfonului (opțional, pentru efecte custom)
-            self.stream = AndroidAudioStream(sr, BLOCKSIZE, ic, self._cb)
-            self.stream.start()
             self.running = True
             self._start_btn.text = '⏹  OPREȘTE'
-            self._log(f'▶ Audio pornit: {sr}Hz, EQ pe output')
-            Clock.schedule_interval(self._vu_tick, 0.05)
+            self._log('▶ Audio processing activ — tot audio sistemul trece prin DSP')
         except Exception as e:
-            self._log(f'EROARE Android audio: {e}')
+            self._log(f'EROARE service: {e}')
             self._start_btn.state = 'normal'
+
+    def _stop_android_service(self):
+        """Oprește serviciul de procesare audio."""
+        try:
+            from jnius import autoclass
+            PythonActivity = autoclass('org.kivy.android.PythonActivity')
+            activity = PythonActivity.mActivity
+            Intent = autoclass('android.content.Intent')
+            service_intent = Intent(activity, autoclass('org.audioboost.AudioBoost'))
+            activity.stopService(service_intent)
+        except Exception as e:
+            self._log(f'EROARE oprire service: {e}')
 
     def _start_desktop(self):
         """Audio desktop prin sounddevice."""
@@ -1382,11 +1441,12 @@ class MainScreen(BoxLayout):
 
     def _stop(self):
         Clock.unschedule(self._vu_tick)
+        if IS_ANDROID:
+            self._stop_android_service()
         if self.stream:
             try: self.stream.stop(); self.stream.close()
             except: pass
             self.stream = None
-        # Eliberează efectele Android
         if hasattr(self, '_fx') and self._fx:
             try: self._fx.release()
             except: pass
@@ -1423,13 +1483,27 @@ class AudioBoostApp(KivyApp):
     def build(self):
         self.title = 'AudioBoost v5'
         screen = MainScreen()
-        # Fix _cb rms attribute
         screen._last_rms = 1e-10
+        self._screen = screen
         return screen
 
     def on_start(self):
         if IS_ANDROID:
             Clock.schedule_once(lambda dt: _request_android_permissions(), 2.0)
+            Clock.schedule_once(lambda dt: self._bind_activity_result(), 3.0)
+
+    def _bind_activity_result(self):
+        """Bind la onActivityResult pentru MediaProjection."""
+        try:
+            from jnius import autoclass
+            from android import activity
+            activity.bind(on_activity_result=self._on_activity_result)
+        except Exception as e:
+            print(f"[AudioBoost] activity bind: {e}")
+
+    def _on_activity_result(self, requestCode, resultCode, data):
+        if requestCode == MEDIA_PROJECTION_REQUEST_CODE:
+            self._screen._on_media_projection_result(resultCode, data)
 
 
 def main():
@@ -1448,48 +1522,4 @@ def main():
         except:
             pass
         try:
-            from kivy.app import App as _A
-            from kivy.uix.label import Label
-            from kivy.uix.boxlayout import BoxLayout
-            from kivy.core.window import Window
-            class ErrApp(_A):
-                def build(self):
-                    self.title = 'AudioBoost - EROARE'
-                    Window.clearcolor = (0.03, 0.03, 0.06, 1)
-                    bl = BoxLayout(orientation='vertical', padding=20)
-                    bl.add_widget(Label(
-                        text=f'EROARE:\\n{e}\\n\\n{tb[-500:]}',
-                        font_size='12sp', halign='left', valign='top',
-                        color=(1, 0.3, 0.3, 1), text_size=(Window.width-40, None)))
-                    return bl
-            ErrApp().run()
-        except:
-            pass
-
-
-if __name__ == '__main__':
-    try:
-        main()
-    except ImportError as e:
-        # Eroare de import — logcat + ecran de eroare
-        import traceback, sys
-        tb = traceback.format_exc()
-        print(f"[IMPORT ERROR] {tb}")
-        try:
-            from kivy.app import App as _A
-            from kivy.uix.label import Label
-            from kivy.uix.boxlayout import BoxLayout
-            from kivy.core.window import Window
-            class ErrApp(_A):
-                def build(self):
-                    self.title = 'AudioBoost - Eroare Import'
-                    Window.clearcolor = (0.03, 0.03, 0.06, 1)
-                    bl = BoxLayout(orientation='vertical', padding=20)
-                    bl.add_widget(Label(
-                        text=f'Eroare import:\\n{e}\\n\\n{tb[-800:]}',
-                        font_size='12sp', halign='left', valign='top',
-                        color=(1, 0.3, 0.3, 1), text_size=(Window.width-40, None)))
-                    return bl
-            ErrApp().run()
-        except:
-            sys.exit(1)
+            from kivy.app import App as 
