@@ -1159,6 +1159,8 @@ class MainScreen(BoxLayout):
 
     def _on_master(self, val):
         self.dsp.set_master(val / 100.0)
+        if IS_ANDROID and self.running:
+            self._write_dsp_params()
 
     # ── Preseturi ────────────────────────────────────────────
     def _build_presets(self):
@@ -1191,6 +1193,8 @@ class MainScreen(BoxLayout):
         if 'amb_room' in p: self._amb_disp.set(p['amb_room'])
         if 'sur_str'  in p: self._sur_sl.set(p['sur_str'])
         self._on_sl()
+        if IS_ANDROID and self.running:
+            self._write_dsp_params()
         self._log(f'Preset: {name}')
 
     # ── Dispozitive ─────────────────────────────────────────
@@ -1198,11 +1202,29 @@ class MainScreen(BoxLayout):
         self._section('DISPOZITIVE', C_BLUE)
 
         if IS_ANDROID:
-            # Android: info + EQ nativ
+            # Android: Output device selector
+            out_row = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(6))
+            out_row.padding = [dp(8), dp(4), dp(8), dp(4)]
+            out_row.add_widget(Label(text='OUTPUT:', size_hint_x=None, width=dp(70),
+                                     font_size=sp(10), bold=True, color=C_TEAL))
+            self._out_spin = Spinner(text='Auto (Default)', values=['Auto (Default)'],
+                                     size_hint_x=1, font_size=sp(9),
+                                     background_color=(0.1, 0.1, 0.18, 1),
+                                     color=C_GOLD)
+            self._out_spin.bind(text=self._on_output_device_change)
+            out_row.add_widget(self._out_spin)
+            self._inner.add_widget(out_row)
+
+            ref_btn = Button(text='↺  Detectează dispozitive',
+                             size_hint_y=None, height=dp(36), font_size=sp(10),
+                             background_color=(0.1, 0.1, 0.18, 1), color=C_TEAL)
+            ref_btn.bind(on_press=lambda b: self._refresh_devices())
+            self._inner.add_widget(ref_btn)
+
             info = Label(
-                text='[color=f0c040]Android: EQ nativ pe OUTPUT audio (toate aplicațiile)[/color]\n'
-                     'Apasă START pentru a activa procesarea audio.\n'
-                     'Folosește Equalizer + DynamicsProcessing API.',
+                text='[color=f0c040]Procesare audio SYSTEM-WIDE (Spotify, YouTube, etc.)[/color]\n'
+                     'Apasă START → acordă permisiunea de captură audio.\n'
+                     'Selectează dispozitivul de ieșire (difuzor/căști).',
                 size_hint_y=None, height=dp(50),
                 font_size=sp(8), color=C_DIM,
                 halign='left', valign='top', markup=True)
@@ -1248,7 +1270,7 @@ class MainScreen(BoxLayout):
 
     def _refresh_devices(self):
         if IS_ANDROID:
-            self._log('Android: audio nativ (AudioRecord/AudioTrack)')
+            self._detect_android_output_devices()
             return
         try:
             import sounddevice as sd
@@ -1274,6 +1296,117 @@ class MainScreen(BoxLayout):
             if spin.values and idx < len(spin.values) and spin.values[idx] == txt:
                 return i
         return None
+
+    def _detect_android_output_devices(self):
+        """Detectează dispozitivele de ieșire audio pe Android."""
+        try:
+            from jnius import autoclass
+            Context = autoclass('android.content.Context')
+            PythonActivity = autoclass('org.kivy.android.PythonActivity')
+            activity = PythonActivity.mActivity
+            AudioManager = autoclass('android.media.AudioManager')
+            am = activity.getSystemService(Context.AUDIO_SERVICE)
+
+            GET_DEVICES_OUTPUTS = 2  # AudioManager.GET_DEVICES_OUTPUTS
+            devices = am.getDevices(GET_DEVICES_OUTPUTS)
+
+            self._android_out_devices = []
+            names = ['Auto (Default)']
+
+            # Device type mapping
+            TYPE_MAP = {
+                1: 'Earpiece',
+                2: 'Speaker',
+                3: 'Wired Headset',
+                4: 'Wired Headphones',
+                7: 'Bluetooth SCO',
+                8: 'Bluetooth A2DP',
+                13: 'USB Device',
+                14: 'USB Headset',
+                22: 'USB Accessory',
+            }
+
+            for i in range(devices.length):
+                d = devices[i]
+                dtype = int(d.getType())
+                dname = d.getProductName().toString()
+                did = int(d.getId())
+                type_name = TYPE_MAP.get(dtype, f'Type {dtype}')
+                label = f'{type_name} ({dname})' if dname else type_name
+                names.append(label)
+                self._android_out_devices.append({
+                    'type': dtype, 'name': dname, 'id': did, 'label': label,
+                    'device': d
+                })
+
+            self._out_spin.values = names
+            self._log(f'Android: {len(self._android_out_devices)} dispozitive OUT găsite')
+        except Exception as e:
+            self._log(f'Eroare detectare dispozitive: {e}')
+            self._android_out_devices = []
+
+    def _on_output_device_change(self, spinner, text):
+        """Când utilizatorul selectează un dispozitiv de ieșire."""
+        if not IS_ANDROID:
+            return
+        if text == 'Auto (Default)':
+            self._selected_output_device = None
+        elif hasattr(self, '_android_out_devices'):
+            for dev in self._android_out_devices:
+                if dev['label'] == text:
+                    self._selected_output_device = dev
+                    break
+        # Write to SharedPreferences if service is running
+        if self.running:
+            self._write_dsp_params()
+
+    def _write_dsp_params(self):
+        """Scrie parametrii DSP în SharedPreferences pentru service."""
+        if not IS_ANDROID:
+            return
+        try:
+            import json
+            sv = self._dsp_sliders
+            if not sv or not hasattr(self, '_amb_wet'):
+                return
+            params = {
+                'master': self.dsp.get_master(),
+                'in_db': sv['in_db'].get(), 'bd': sv['bd'].get(),
+                'td': sv['td'].get(), 'pd': sv['pd'].get(),
+                'ex': sv['ex'].get(), 'thr': sv['thr'].get(),
+                'rat': sv['rat'].get(), 'mkup': sv['mkup'].get(),
+                'pmix': sv['pmix'].get(), 'sw': sv['sw'].get(),
+                'haas': sv['haas'].get(), 'od': sv['od'].get(),
+                'ds': sv['ds'].get(), 'up': sv['up'].get(),
+                'amb_wet': self._amb_wet.get(),
+                'amb_room': self._amb_disp.get(),
+                'amb_damp': self._amb_damp.get(),
+                'amb_pre': self._amb_pre.get(),
+                'sur_str': self._sur_sl.get(),
+            }
+            # Output device
+            if hasattr(self, '_selected_output_device') and self._selected_output_device:
+                params['output_device_id'] = self._selected_output_device['id']
+            else:
+                params['output_device_id'] = -1
+            # PEQ bands
+            peq = []
+            for row in self._peq_rows:
+                peq.append({
+                    'freq': row.freq, 'gain_db': row.gain_db,
+                    'q': row.q, 'enabled': row.enabled
+                })
+            params['peq'] = peq
+
+            from jnius import autoclass
+            PythonActivity = autoclass('org.kivy.android.PythonActivity')
+            activity = PythonActivity.mActivity
+            sp = activity.getSharedPreferences('audioboost_prefs', 0)
+            editor = sp.edit()
+            editor.putString('dsp_params', json.dumps(params))
+            editor.apply()
+        except Exception as e:
+            print(f'[IPC] Write error: {e}')
 
     # ── DSP Sliders ─────────────────────────────────────────
     def _build_dsp_sliders(self):
@@ -1306,7 +1439,7 @@ class MainScreen(BoxLayout):
         if not sv:
             return
         if not hasattr(self, '_amb_wet'):
-            return  # Ambience sliders not built yet
+            return
         self.dsp.update(
             sv['in_db'].get(), sv['bd'].get(), sv['td'].get(),
             sv['pd'].get(),    sv['ex'].get(), sv['thr'].get(),
@@ -1317,6 +1450,8 @@ class MainScreen(BoxLayout):
             amb_damp=self._amb_damp.get(), amb_pre=self._amb_pre.get(),
             sur_str=self._sur_sl.get()
         )
+        if IS_ANDROID and self.running:
+            self._write_dsp_params()
 
     # ── Ambience + 3D ────────────────────────────────────────
     def _build_ambience(self):
@@ -1362,12 +1497,8 @@ class MainScreen(BoxLayout):
     def _on_peq(self, idx):
         row = self._peq_rows[idx]
         self.dsp.update_peq(idx, row.freq, row.gain_db, row.q, row.enabled)
-        # Android: actualizează și efectele native
-        if IS_ANDROID and hasattr(self, '_fx') and self._fx:
-            if self._fx.has_dynamics_processing():
-                self._fx.set_dp_band(idx, row.freq, row.gain_db, row.q)
-            else:
-                self._fx.set_band_gain(idx, row.gain_db)
+        if IS_ANDROID and self.running:
+            self._write_dsp_params()
 
     def _on_eq_preset(self, spinner, text):
         """Aplică un preset EQ pe cele 5 benzi parametrice."""
@@ -1392,11 +1523,8 @@ class MainScreen(BoxLayout):
                 row._lv_q.text = f'Q{q:.1f}'
                 # Update DSP
                 self.dsp.update_peq(i, freq, gain, q, enabled)
-                if IS_ANDROID and hasattr(self, '_fx') and self._fx:
-                    if self._fx.has_dynamics_processing():
-                        self._fx.set_dp_band(i, freq, gain, q)
-                    else:
-                        self._fx.set_band_gain(i, gain)
+        if IS_ANDROID and self.running:
+            self._write_dsp_params()
         self._log(f'EQ Preset: {text}')
 
     # ── Start / Stop ─────────────────────────────────────────
@@ -1425,45 +1553,81 @@ class MainScreen(BoxLayout):
             self._log('sounddevice lipsă — instalează: pip install sounddevice')
 
     def _start_android(self):
-        """Audio nativ Android — efecte EQ pe output + procesare microfon."""
+        """Pornește procesarea audio system-wide prin MediaProjection service."""
         try:
-            sr = 44100; ic = CHANNELS; oc = CHANNELS
-            self.dsp = RadioDSP(sr=sr, ch=ic)
+            from jnius import autoclass
+            PythonActivity = autoclass('org.kivy.android.PythonActivity')
+            activity = PythonActivity.mActivity
+            Context = autoclass('android.content.Context')
+
+            # 1. Detectează dispozitive output
+            if not hasattr(self, '_android_out_devices'):
+                self._detect_android_output_devices()
+
+            # 2. Scrie parametrii DSP inițiali
+            self.dsp = RadioDSP(sr=44100, ch=CHANNELS)
             self._on_master(self._master_sl.get())
             self._on_sl()
-            self._err = 0
+            self._write_dsp_params()
 
-            # Pornește streamul audio (creează AudioRecord + AudioTrack)
-            self.stream = AndroidAudioStream(sr, BLOCKSIZE, ic, self._cb)
-            self.stream.start()
+            # 3. Request MediaProjection permission via startActivityForResult
+            REQUEST_CODE_MP = 1001
 
-            # Inițializează efectele DUPĂ ce streamul pornește
-            # (AudioTrack trebuie să existe pentru session ID corect)
-            import time as _t
-            _t.sleep(0.3)  # Lasă AudioTrack-ul să se inițializeze
-            session_id = self.stream._rec_session
-            self._fx = AndroidAudioEffects(session_id=session_id)
-            fx_ok = self._fx.init()
-            if fx_ok:
-                self._log(f'▶ EQ nativ activ: {self._fx.get_num_bands()} benzi (session={session_id})')
-                if self._fx.has_dynamics_processing():
-                    self._log('  DynamicsProcessing: EQ parametric cu Q controlabil')
-                # Aplică setările PEQ curente pe efectele native
-                for i, row in enumerate(self._peq_rows):
-                    if row.enabled and abs(row.gain_db) > 0.05:
-                        if self._fx.has_dynamics_processing():
-                            self._fx.set_dp_band(i, row.freq, row.gain_db, row.q)
-                        else:
-                            self._fx.set_band_gain(i, row.gain_db)
-            else:
-                self._log('⚠ Efecte audio native indisponibile — doar DSP procesare')
+            from android.activity import on_activity_result
+            main_self = self
+
+            def _on_mp_result(requestCode, resultCode, data):
+                if requestCode != REQUEST_CODE_MP:
+                    return
+                if resultCode == -1 and data is not None:  # RESULT_OK
+                    Clock.schedule_once(
+                        lambda dt: main_self._start_service_with_projection(
+                            resultCode, data), 0)
+                else:
+                    Clock.schedule_once(
+                        lambda dt: main_self._log(
+                            'Permisiune MediaProjection refuzată'), 0)
+                    Clock.schedule_once(
+                        lambda dt: setattr(main_self._start_btn, 'state', 'normal'), 0)
+
+            on_activity_result(REQUEST_CODE_MP, _on_mp_result)
+
+            MProjectionManager = autoclass('android.media.projection.MediaProjectionManager')
+            mp_mgr = activity.getSystemService(Context.MEDIA_PROJECTION_SERVICE)
+            intent = mp_mgr.createScreenCaptureIntent()
+            activity.startActivityForResult(intent, REQUEST_CODE_MP)
+            self._log('Aștept permisiunea MediaProjection...')
+
+        except Exception as e:
+            self._log(f'EROARE Android: {e}')
+            self._start_btn.state = 'normal'
+
+    def _start_service_with_projection(self, result_code, result_data):
+        """Pornește service-ul cu MediaProjection data."""
+        try:
+            from jnius import autoclass
+            PythonActivity = autoclass('org.kivy.android.PythonActivity')
+            activity = PythonActivity.mActivity
+            Intent = autoclass('android.content.Intent')
+            Context = autoclass('android.content.Context')
+
+            # Create intent for the service
+            service_cls = autoclass('org.audioboost.AudioBoost')
+            intent = Intent(activity, service_cls)
+            intent.putExtra('resultCode', result_code)
+            # Pass the MediaProjection result data (Intent) as Parcelable
+            intent.putExtra('resultData', result_data)
+
+            # Start foreground service
+            activity.startForegroundService(intent)
 
             self.running = True
             self._start_btn.text = '⏹  OPREȘTE'
-            self._log(f'▶ Audio pornit: {sr}Hz, DSP + EQ nativ')
-            Clock.schedule_interval(self._vu_tick, 0.05)
+            self._log('▶ Procesare audio system-wide pornită!')
+            self._log('  Redă muzică în Spotify/YouTube pentru a auzi efectul')
+            Clock.schedule_interval(self._vu_tick, 0.5)
         except Exception as e:
-            self._log(f'EROARE Android audio: {e}')
+            self._log(f'EROARE pornire service: {e}')
             self._start_btn.state = 'normal'
 
     def _start_desktop(self):
@@ -1498,20 +1662,31 @@ class MainScreen(BoxLayout):
 
     def _stop(self):
         Clock.unschedule(self._vu_tick)
-        if self.stream:
-            try: self.stream.stop(); self.stream.close()
-            except: pass
-            self.stream = None
-        # Eliberează efectele Android
-        if hasattr(self, '_fx') and self._fx:
-            try: self._fx.release()
-            except: pass
-            self._fx = None
+        if IS_ANDROID:
+            self._stop_android()
+        else:
+            if self.stream:
+                try: self.stream.stop(); self.stream.close()
+                except: pass
+                self.stream = None
         self.running = False
         self._start_btn.text = '▶  PORNEȘTE'
         self._start_btn.state = 'normal'
         self.vu.update(-60)
         self._log('⏸ Oprit.')
+
+    def _stop_android(self):
+        """Oprește service-ul Android."""
+        try:
+            from jnius import autoclass
+            PythonActivity = autoclass('org.kivy.android.PythonActivity')
+            activity = PythonActivity.mActivity
+            Intent = autoclass('android.content.Intent')
+            service_cls = autoclass('org.audioboost.AudioBoost')
+            intent = Intent(activity, service_cls)
+            activity.stopService(intent)
+        except Exception as e:
+            self._log(f'Eroare oprire service: {e}')
 
     def _cb(self, indata, outdata, frames, time_info, status):
         try:
