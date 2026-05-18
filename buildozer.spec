@@ -16,7 +16,7 @@ services = AudioBoost:service_audio.py
 orientation = portrait
 fullscreen = 0
 
-android.permissions = MODIFY_AUDIO_SETTINGS, FOREGROUND_SERVICE
+android.permissions = RECORD_AUDIO, MODIFY_AUDIO_SETTINGS, FOREGROUND_SERVICE
 android.api = 33
 android.minapi = 29
 android.ndk = 28c
