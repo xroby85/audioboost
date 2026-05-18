@@ -1426,53 +1426,45 @@ class MainScreen(BoxLayout):
             self._log('sounddevice lipsă — instalează: pip install sounddevice')
 
     def _start_android(self):
-        """AudioEffects pe session ID real + microfon loopback."""
+        """Cere permisiunea MediaProjection pentru procesare audio system-wide."""
         try:
-            import time as _t
-            sr = 44100; ic = CHANNELS
-            self.dsp = RadioDSP(sr=sr, ch=ic)
-            self._on_master(self._master_sl.get())
-            self._on_sl()
-            self._err = 0
+            from jnius import autoclass
+            PythonActivity = autoclass('org.kivy.android.PythonActivity')
+            activity = PythonActivity.mActivity
+            Context = autoclass('android.content.Context')
 
-            # 1. Pornește streamul audio (creează AudioTrack cu session ID real)
-            self.stream = AndroidAudioStream(sr, BLOCKSIZE, ic, self._cb)
-            self.stream.start()
-            _t.sleep(0.5)  # Lasă AudioTrack să se inițializeze
+            REQUEST_CODE_MP = 1001
+            MProjectionManager = autoclass(
+                'android.media.projection.MediaProjectionManager')
+            mp_mgr = activity.getSystemService(Context.MEDIA_PROJECTION_SERVICE)
+            intent = mp_mgr.createScreenCaptureIntent()
+            activity.startActivityForResult(intent, REQUEST_CODE_MP)
+            self._log('Cere permisiune audio...')
 
-            # 2. Încearcă efecte pe session ID real, apoi fallback la session 0
-            sid = getattr(self.stream, '_rec_session', 0)
-            self._fx = None
-            for try_sid in [sid, 0]:
-                if try_sid == 0 and sid != 0:
-                    pass  # fallback
-                fx = AndroidAudioEffects(session_id=try_sid)
-                if fx.init():
-                    self._fx = fx
-                    self._log(f'▶ EQ activ (session {try_sid}): {fx.get_num_bands()} benzi')
-                    if fx.has_dynamics_processing():
-                        self._log('  DynamicsProcessing: Q controlabil')
-                    break
-                fx.release()
+        except Exception as e:
+            self._log(f'EROARE: {e}')
+            self._start_btn.state = 'normal'
 
-            if not self._fx:
-                self._log('⚠ Efecte native indisponibile — doar DSP')
+    def _start_service_with_projection(self, result_code, result_data):
+        """Pornește service-ul cu MediaProjection."""
+        try:
+            from jnius import autoclass
+            PythonActivity = autoclass('org.kivy.android.PythonActivity')
+            activity = PythonActivity.mActivity
+            Intent = autoclass('android.content.Intent')
 
-            # 3. Aplică PEQ
-            if self._fx:
-                for i, row in enumerate(self._peq_rows):
-                    if row.enabled and abs(row.gain_db) > 0.05:
-                        if self._fx.has_dynamics_processing():
-                            self._fx.set_dp_band(i, row.freq, row.gain_db, row.q)
-                        else:
-                            self._fx.set_band_gain(i, row.gain_db)
+            service_cls = autoclass('org.audioboost.AudioBoost')
+            intent = Intent(activity, service_cls)
+            intent.putExtra('resultCode', result_code)
+            intent.putExtra('resultData', result_data)
+            activity.startForegroundService(intent)
 
             self.running = True
             self._start_btn.text = '⏹  OPREȘTE'
-            self._log(f'▶ Audio pornit: {sr}Hz')
-            Clock.schedule_interval(self._vu_tick, 0.05)
+            self._log('▶ Procesare audio system-wide!')
+            self._log('  Redă muzică în Spotify/YouTube')
         except Exception as e:
-            self._log(f'EROARE Android: {e}')
+            self._log(f'EROARE service: {e}')
             self._start_btn.state = 'normal'
 
     def _start_desktop(self):
@@ -1507,10 +1499,13 @@ class MainScreen(BoxLayout):
 
     def _stop(self):
         Clock.unschedule(self._vu_tick)
-        if self.stream:
-            try: self.stream.stop(); self.stream.close()
-            except: pass
-            self.stream = None
+        if IS_ANDROID:
+            self._stop_android_service()
+        else:
+            if self.stream:
+                try: self.stream.stop(); self.stream.close()
+                except: pass
+                self.stream = None
         if hasattr(self, '_fx') and self._fx:
             try: self._fx.release()
             except: pass
@@ -1520,6 +1515,18 @@ class MainScreen(BoxLayout):
         self._start_btn.state = 'normal'
         self.vu.update(-60)
         self._log('⏸ Oprit.')
+
+    def _stop_android_service(self):
+        """Oprește service-ul Android."""
+        try:
+            from jnius import autoclass
+            PythonActivity = autoclass('org.kivy.android.PythonActivity')
+            activity = PythonActivity.mActivity
+            Intent = autoclass('android.content.Intent')
+            service_cls = autoclass('org.audioboost.AudioBoost')
+            activity.stopService(Intent(activity, service_cls))
+        except Exception:
+            pass
 
     def _cb(self, indata, outdata, frames, time_info, status):
         try:
@@ -1547,13 +1554,40 @@ class AudioBoostApp(KivyApp):
     def build(self):
         self.title = 'AudioBoost v5'
         screen = MainScreen()
-        # Fix _cb rms attribute
         screen._last_rms = 1e-10
         return screen
 
     def on_start(self):
         if IS_ANDROID:
             Clock.schedule_once(lambda dt: _request_android_permissions(), 2.0)
+            Clock.schedule_once(lambda dt: self._register_mp_callback(), 3.0)
+
+    def _register_mp_callback(self):
+        """Înregistrează callback pentru MediaProjection result."""
+        try:
+            from android.activity import on_activity_result
+            REQUEST_CODE_MP = 1001
+
+            def _on_result(requestCode, resultCode, data):
+                if requestCode != REQUEST_CODE_MP:
+                    return
+                screen = self.root
+                if resultCode == -1 and data is not None:
+                    Clock.schedule_once(
+                        lambda dt: screen._start_service_with_projection(
+                            resultCode, data), 0)
+                else:
+                    Clock.schedule_once(
+                        lambda dt: screen._log(
+                            'Permisiune audio refuzată'), 0)
+                    Clock.schedule_once(
+                        lambda dt: setattr(screen._start_btn,
+                                           'state', 'normal'), 0)
+
+            on_activity_result(REQUEST_CODE_MP, _on_result)
+            print("[AudioBoost] MediaProjection callback registered")
+        except Exception as e:
+            print(f"[AudioBoost] on_activity_result unavailable: {e}")
 
 
 def main():
