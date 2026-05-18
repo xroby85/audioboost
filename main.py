@@ -172,103 +172,41 @@ class AndroidAudioStream:
             AudioManager = autoclass('android.media.AudioManager')
 
             # Encoding: PCM 16-bit
-            enc = AudioFormat.ENCODING_PCM_16BIT
-            src = 1   # MIC
+            enc   = AudioFormat.ENCODING_PCM_16BIT
+            ch_in = AudioFormat.CHANNEL_IN_STEREO if self.ch==2 else AudioFormat.CHANNEL_IN_MONO
+            ch_out= AudioFormat.CHANNEL_OUT_STEREO if self.ch==2 else AudioFormat.CHANNEL_OUT_MONO
+            src   = 1   # MIC
 
-            # ── FIX: Incearcam stereo, fallback la mono ──────────
-            # Multe telefoane NU suporta CHANNEL_IN_STEREO → AudioRecord invalid
-            ch_in_stereo  = AudioFormat.CHANNEL_IN_STEREO
-            ch_in_mono    = AudioFormat.CHANNEL_IN_MONO
-            ch_out_stereo = AudioFormat.CHANNEL_OUT_STEREO
-            ch_out_mono   = AudioFormat.CHANNEL_OUT_MONO
-
-            # Verificam daca stereo e suportat (getMinBufferSize returneaza -1 sau -2 pt eroare)
-            buf_test = AudioRecord.getMinBufferSize(self.sr, ch_in_stereo, enc)
-            if buf_test > 0 and self.ch == 2:
-                ch_in  = ch_in_stereo
-                ch_out = ch_out_stereo
-                n_ch   = 2
-            else:
-                ch_in  = ch_in_mono
-                ch_out = ch_out_mono
-                n_ch   = 1
-                print("[AndroidAudio] Stereo nesustinut, folosim Mono")
-
-            n_samples  = self.bs * n_ch
-            buf_sz_in  = max(n_samples * 2,
+            buf_sz_in  = max(self.bs * self.ch * 2,
                              AudioRecord.getMinBufferSize(self.sr, ch_in, enc))
-            buf_sz_out = max(n_samples * 2,
+            buf_sz_out = max(self.bs * self.ch * 2,
                              AudioTrack.getMinBufferSize(self.sr, ch_out, enc))
 
             rec = AudioRecord(src, self.sr, ch_in, enc, buf_sz_in)
             trk = AudioTrack(AudioManager.STREAM_MUSIC, self.sr,
                              ch_out, enc, buf_sz_out,
                              AudioTrack.MODE_STREAM)
-
-            # ── FIX: Verificam ca AudioRecord e initializat corect ──
-            STATE_INITIALIZED = 1
-            if rec.getState() != STATE_INITIALIZED:
-                raise RuntimeError("AudioRecord nu s-a initializat (verificati permisiunea RECORD_AUDIO!)")
-
             rec.startRecording(); trk.play()
 
-            # ── FIX: Folosim Java short[] in loc de Python array ──
-            # arr.array('h', ...) nu e compatibil cu AudioRecord.read pe Android
-            from jnius import autoclass as _ac
-            ShortArray = _ac('java.lang.reflect.Array')
-            JavaShort  = _ac('java.lang.Short')
-            # Cream buffer Java short[]
-            jbuf = [0] * n_samples  # vom folosi bytearray via ByteBuffer
-
-            # Alternativa stabila: citim in ByteBuffer
-            ByteBuffer = _ac('java.nio.ByteBuffer')
-            byte_count = n_samples * 2  # 2 bytes per int16
-            java_buf   = ByteBuffer.allocateDirect(byte_count)
-            java_buf.order(_ac('java.nio.ByteOrder').LITTLE_ENDIAN)
+            import array as arr
+            n_samples = self.bs * self.ch
 
             while self._running:
-                java_buf.rewind()
-                read_result = rec.read(java_buf, byte_count)
-                if read_result < 0:
-                    print(f"[AndroidAudio] read eroare: {read_result}")
-                    continue
-                java_buf.rewind()
-                # Extragem bytes in Python
-                raw = bytes([java_buf.get() & 0xFF for _ in range(min(read_result, byte_count))])
-                in_f32 = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
-
-                # Daca am citit mai putin, completam cu zero
-                if len(in_f32) < n_samples:
-                    in_f32 = np.pad(in_f32, (0, n_samples - len(in_f32)))
-
-                if n_ch == 1:
-                    # Mono → stereo pentru DSP
-                    indata = np.column_stack([in_f32[:self.bs], in_f32[:self.bs]])
-                else:
-                    indata = in_f32[:self.bs * 2].reshape(-1, 2)
-
+                buf_in = arr.array('h', [0] * n_samples)
+                rec.read(buf_in, n_samples)
+                # Convertim la float32 [-1, 1]
+                in_f32 = np.frombuffer(bytes(buf_in), dtype=np.int16).astype(np.float32) / 32768.0
+                indata = in_f32.reshape(-1, self.ch)
                 outdata = np.zeros_like(indata)
                 self._cb(indata, outdata, self.bs, None, None)
-
                 # Convertim la int16
                 out_i16 = (np.clip(outdata, -1, 1) * 32767).astype(np.int16)
-                if n_ch == 1:
-                    out_mono = ((out_i16[:, 0] + out_i16[:, 1]) / 2).astype(np.int16)
-                    out_bytes = out_mono.tobytes()
-                else:
-                    out_bytes = out_i16.tobytes()
-
-                # Scriem in ByteBuffer Java
-                out_java_buf = ByteBuffer.allocateDirect(len(out_bytes))
-                out_java_buf.put(list(bytearray(out_bytes)))
-                out_java_buf.rewind()
-                trk.write(out_java_buf, len(out_bytes), AudioTrack.WRITE_NON_BLOCKING)
+                trk.write(out_i16.tobytes(), len(out_i16.tobytes()), AudioTrack.WRITE_NON_BLOCKING)
 
             rec.stop(); rec.release()
             trk.stop(); trk.release()
         except Exception as e:
-            import traceback
-            print(f"[AndroidAudio] Eroare: {e}\n{traceback.format_exc()}")
+            print(f"[AndroidAudio] Eroare: {e}")
 
 def _mc(sos, x, zi):
     ch = x.shape[1]; y = np.empty_like(x); zi_new = np.empty_like(zi)
@@ -709,30 +647,28 @@ from kivy.clock import Clock
 from kivy.core.window import Window
 from kivy.metrics import dp, sp
 
-# Window.clearcolor se setează în App.build() — nu la nivel de modul (crash pe Android)
+Window.clearcolor = (0.031, 0.031, 0.063, 1)   # #080810
 
 # ── Cerere permisiuni Android ─────────────────────────────────
 def _request_android_permissions():
-    """
-    Folosim modulul android.permissions (standard python-for-android).
-    NU folosim jnius direct — conversia Python list -> Java String[] e nesigura.
-    """
     if not IS_ANDROID:
         return
     try:
-        from android.permissions import request_permissions, Permission
-        request_permissions([Permission.RECORD_AUDIO])
+        from jnius import autoclass
+        PythonActivity = autoclass('org.kivy.android.PythonActivity')
+        activity = PythonActivity.mActivity
+        perms = ["android.permission.RECORD_AUDIO"]
+        to_req = []
+        for p in perms:
+            try:
+                if activity.checkSelfPermission(p) != 0:
+                    to_req.append(p)
+            except Exception:
+                to_req.append(p)
+        if to_req:
+            activity.requestPermissions(to_req, 1001)
     except Exception as e:
-        # Fallback jnius daca modulul android nu e disponibil
-        try:
-            from jnius import autoclass
-            PythonActivity = autoclass('org.kivy.android.PythonActivity')
-            activity = PythonActivity.mActivity
-            # Construim Java String[] corect via cast
-            perms_list = ["android.permission.RECORD_AUDIO"]
-            activity.requestPermissions(perms_list, 1001)
-        except Exception as e2:
-            print(f"[Permissions] Eroare: {e} / {e2}")
+        print(f"[Permissions] Eroare: {e}")
 
 # Culori
 C_ACC  = (0.878, 0.176, 0.435, 1)
@@ -1047,10 +983,6 @@ class MainScreen(BoxLayout):
         self._log_lbl.text = msg + '\n' + '\n'.join(prev)
 
     def _refresh_devices(self):
-        # Pe Android nu exista sounddevice — sarim peste
-        if IS_ANDROID:
-            self._log('Android: dispozitiv audio gestionat automat')
-            return
         try:
             import sounddevice as sd
             devs = sd.query_devices()
@@ -1253,8 +1185,6 @@ class MainScreen(BoxLayout):
 class AudioBoostApp(KivyApp):
     def build(self):
         self.title = 'AudioBoost v5'
-        # FIX: Window.clearcolor TREBUIE setat in build(), nu la nivel de modul
-        Window.clearcolor = (0.031, 0.031, 0.063, 1)
         screen = MainScreen()
         # Fix _cb rms attribute
         screen._last_rms = 1e-10
@@ -1273,6 +1203,13 @@ def main():
         import traceback, sys
         tb = traceback.format_exc()
         print(f"[FATAL] {tb}")
+        # Scrie și în logcat pentru Android
+        try:
+            from jnius import autoclass
+            Log = autoclass('android.util.Log')
+            Log.e('AudioBoost', f'FATAL: {tb}')
+        except:
+            pass
         try:
             from kivy.app import App as _A
             from kivy.uix.label import Label
@@ -1294,4 +1231,28 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except ImportError as e:
+        # Eroare de import — logcat + ecran de eroare
+        import traceback, sys
+        tb = traceback.format_exc()
+        print(f"[IMPORT ERROR] {tb}")
+        try:
+            from kivy.app import App as _A
+            from kivy.uix.label import Label
+            from kivy.uix.boxlayout import BoxLayout
+            from kivy.core.window import Window
+            class ErrApp(_A):
+                def build(self):
+                    self.title = 'AudioBoost - Eroare Import'
+                    Window.clearcolor = (0.03, 0.03, 0.06, 1)
+                    bl = BoxLayout(orientation='vertical', padding=20)
+                    bl.add_widget(Label(
+                        text=f'Eroare import:\\n{e}\\n\\n{tb[-800:]}',
+                        font_size='12sp', halign='left', valign='top',
+                        color=(1, 0.3, 0.3, 1), text_size=(Window.width-40, None)))
+                    return bl
+            ErrApp().run()
+        except:
+            sys.exit(1)
