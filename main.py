@@ -1277,55 +1277,8 @@ class MainScreen(BoxLayout):
                 return i
         return None
 
-    def _detect_android_output_devices(self):
-        """Detectează dispozitivele de ieșire audio pe Android."""
-        try:
-            from jnius import autoclass
-            Context = autoclass('android.content.Context')
-            PythonActivity = autoclass('org.kivy.android.PythonActivity')
-            activity = PythonActivity.mActivity
-            AudioManager = autoclass('android.media.AudioManager')
-            am = activity.getSystemService(Context.AUDIO_SERVICE)
-
-            TYPE_MAP = {
-                1: 'Earpiece', 2: 'Speaker', 3: 'Wired Headset',
-                4: 'Wired Headphones', 7: 'BT SCO', 8: 'BT A2DP',
-                13: 'USB', 14: 'USB Headset', 22: 'USB Accessory',
-            }
-
-            self._android_out_devices = []
-            names = ['Auto (Default)']
-
-            try:
-                GET_DEVICES_OUTPUTS = 2
-                devices = am.getDevices(GET_DEVICES_OUTPUTS)
-                n = int(devices.length)
-            except Exception:
-                n = 0
-
-            for i in range(n):
-                try:
-                    d = devices[i]
-                    dtype = int(d.getType())
-                    dname = str(d.getProductName())
-                    did = int(d.getId())
-                    type_name = TYPE_MAP.get(dtype, f'Type {dtype}')
-                    label = f'{type_name} ({dname})' if dname else type_name
-                    names.append(label)
-                    self._android_out_devices.append({
-                        'type': dtype, 'name': dname, 'id': did, 'label': label
-                    })
-                except Exception:
-                    pass
-
-            self._out_spin.values = names
-            self._log(f'Android: {len(self._android_out_devices)} dispozitive OUT')
-        except Exception as e:
-            self._log(f'Dispozitive: {e}')
-            self._android_out_devices = []
-
     def _write_dsp_params(self):
-        """No-op on Android (effects applied directly)."""
+        """No-op pe Android."""
         pass
 
     # ── DSP Sliders ─────────────────────────────────────────
@@ -1473,35 +1426,51 @@ class MainScreen(BoxLayout):
             self._log('sounddevice lipsă — instalează: pip install sounddevice')
 
     def _start_android(self):
-        """Pornește native AudioEffects pe session 0 (procesează tot output-ul)."""
+        """AudioEffects pe session ID real + microfon loopback."""
         try:
+            import time as _t
             sr = 44100; ic = CHANNELS
             self.dsp = RadioDSP(sr=sr, ch=ic)
             self._on_master(self._master_sl.get())
             self._on_sl()
             self._err = 0
 
-            # Inițializează efecte audio native pe session 0 (global output)
-            self._fx = AndroidAudioEffects(session_id=0)
-            fx_ok = self._fx.init()
-            if fx_ok:
-                self._log(f'▶ EQ nativ activ: {self._fx.get_num_bands()} benzi')
-                if self._fx.has_dynamics_processing():
-                    self._log('  DynamicsProcessing: EQ parametric cu Q')
-                # Aplică PEQ curent
+            # 1. Pornește streamul audio (creează AudioTrack cu session ID real)
+            self.stream = AndroidAudioStream(sr, BLOCKSIZE, ic, self._cb)
+            self.stream.start()
+            _t.sleep(0.5)  # Lasă AudioTrack să se inițializeze
+
+            # 2. Încearcă efecte pe session ID real, apoi fallback la session 0
+            sid = getattr(self.stream, '_rec_session', 0)
+            self._fx = None
+            for try_sid in [sid, 0]:
+                if try_sid == 0 and sid != 0:
+                    pass  # fallback
+                fx = AndroidAudioEffects(session_id=try_sid)
+                if fx.init():
+                    self._fx = fx
+                    self._log(f'▶ EQ activ (session {try_sid}): {fx.get_num_bands()} benzi')
+                    if fx.has_dynamics_processing():
+                        self._log('  DynamicsProcessing: Q controlabil')
+                    break
+                fx.release()
+
+            if not self._fx:
+                self._log('⚠ Efecte native indisponibile — doar DSP')
+
+            # 3. Aplică PEQ
+            if self._fx:
                 for i, row in enumerate(self._peq_rows):
                     if row.enabled and abs(row.gain_db) > 0.05:
                         if self._fx.has_dynamics_processing():
                             self._fx.set_dp_band(i, row.freq, row.gain_db, row.q)
                         else:
                             self._fx.set_band_gain(i, row.gain_db)
-            else:
-                self._log('⚠ Efecte native indisponibile')
 
             self.running = True
             self._start_btn.text = '⏹  OPREȘTE'
-            self._log('▶ Procesare audio activă!')
-            self._log('  Redă muzică în orice aplicație')
+            self._log(f'▶ Audio pornit: {sr}Hz')
+            Clock.schedule_interval(self._vu_tick, 0.05)
         except Exception as e:
             self._log(f'EROARE Android: {e}')
             self._start_btn.state = 'normal'
@@ -1538,12 +1507,10 @@ class MainScreen(BoxLayout):
 
     def _stop(self):
         Clock.unschedule(self._vu_tick)
-        if not IS_ANDROID:
-            if self.stream:
-                try: self.stream.stop(); self.stream.close()
-                except: pass
-                self.stream = None
-        # Eliberează efectele Android
+        if self.stream:
+            try: self.stream.stop(); self.stream.close()
+            except: pass
+            self.stream = None
         if hasattr(self, '_fx') and self._fx:
             try: self._fx.release()
             except: pass
