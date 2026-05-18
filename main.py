@@ -60,32 +60,55 @@ def butter(order, cutoff, btype='low', fs=None):
 
 
 def lfilter(b, a, x, zi=None):
-    """Filtru IIR direct-form II transposed. x: 1D array."""
-    n = len(x)
-    y = np.empty(n, dtype=np.float64)
+    """Filtru IIR direct-form II transposed. x: 1D array. Optimizat pentru viteză."""
     b = np.asarray(b, dtype=np.float64)
     a = np.asarray(a, dtype=np.float64)
+    x = np.asarray(x, dtype=np.float64)
+    n = len(x)
     order = max(len(b), len(a)) - 1
     if zi is not None:
         z = np.array(zi, dtype=np.float64)
     else:
         z = np.zeros(order)
-    for i in range(n):
-        acc = b[0] * x[i] + z[0]
-        for j in range(order - 1):
-            z[j] = b[j+1] * x[i] + z[j+1] - a[j+1] * acc
-        z[order-1] = b[order] * x[i] - a[order] * acc
-        y[i] = acc
+    y = np.empty(n, dtype=np.float64)
+
+    if order == 2:
+        # Biquad vectorizat — mult mai rapid decât bucla generică
+        b0, b1, b2 = b[0], b[1], b[2]
+        a1, a2 = a[1], a[2]
+        z0, z1 = z[0], z[1]
+        for i in range(n):
+            xn = x[i]
+            yn = b0 * xn + z0
+            z0 = b1 * xn - a1 * yn + z1
+            z1 = b2 * xn - a2 * yn
+            y[i] = yn
+        z[0] = z0; z[1] = z1
+    elif order == 1:
+        b0, b1 = b[0], b[1]
+        a1 = a[1]
+        z0 = z[0]
+        for i in range(n):
+            xn = x[i]
+            yn = b0 * xn + z0
+            z0 = b1 * xn - a1 * yn
+            y[i] = yn
+        z[0] = z0
+    else:
+        for i in range(n):
+            acc = b[0] * x[i] + z[0]
+            for j in range(order - 1):
+                z[j] = b[j+1] * x[i] + z[j+1] - a[j+1] * acc
+            z[order-1] = b[order] * x[i] - a[order] * acc
+            y[i] = acc
     return y, z
 
 
 def sosfilt_zi(sos):
     """Stare inițială pentru sosfilt (steady-state la intrare 1)."""
-    # sos format: [b0, b1, b2, a0, a1, a2]
     zi = np.zeros((len(sos), 2))
     for s, row in enumerate(sos):
         b0, b1, b2, a0, a1, a2 = row
-        # Steady-state: y = (b0+b1+b2)/(1+a1+a2) pentru x=1 constant
         dc = (b0 + b1 + b2) / (1.0 + a1 + a2) if (1.0 + a1 + a2) != 0 else 0.0
         zi[s, 0] = dc
         zi[s, 1] = dc
@@ -93,8 +116,9 @@ def sosfilt_zi(sos):
 
 
 def sosfilt(sos, x, zi=None):
-    """Cascade de biquad-uri. sos: Nx6, x: 1D, zi: Nx2"""
+    """Cascade de biquad-uri. sos: Nx6, x: 1D, zi: Nx2. Optimizat."""
     y = np.array(x, dtype=np.float64)
+    n = len(y)
     n_sec = len(sos)
     if zi is not None:
         z = zi.copy()
@@ -103,7 +127,8 @@ def sosfilt(sos, x, zi=None):
     for s in range(n_sec):
         b0, b1, b2, a0, a1, a2 = sos[s]
         z0, z1 = z[s, 0], z[s, 1]
-        for i in range(len(y)):
+        # Biquad direct-form II transposed — variabile locale pt viteză
+        for i in range(n):
             xn = y[i]
             yn = b0 * xn + z0
             z0 = b1 * xn - a1 * yn + z1
@@ -187,9 +212,11 @@ class AndroidAudioStream:
                              ch_out, enc, buf_sz_out,
                              AudioTrack.MODE_STREAM)
             rec.startRecording(); trk.play()
+            print(f"[AndroidAudio] Pornit: {self.sr}Hz, {self.ch}ch, block={self.bs}")
 
             import array as arr
             n_samples = self.bs * self.ch
+            err_count = 0
 
             while self._running:
                 buf_in = arr.array('h', [0] * n_samples)
@@ -198,10 +225,16 @@ class AndroidAudioStream:
                 in_f32 = np.frombuffer(bytes(buf_in), dtype=np.int16).astype(np.float32) / 32768.0
                 indata = in_f32.reshape(-1, self.ch)
                 outdata = np.zeros_like(indata)
-                self._cb(indata, outdata, self.bs, None, None)
-                # Convertim la int16
+                try:
+                    self._cb(indata, outdata, self.bs, None, None)
+                except Exception as cb_err:
+                    err_count += 1
+                    if err_count <= 5:
+                        print(f"[AndroidAudio] CB eroare: {cb_err}")
+                # Convertim la int16 și scriem BLOCKING (fără pierderi)
                 out_i16 = (np.clip(outdata, -1, 1) * 32767).astype(np.int16)
-                trk.write(out_i16.tobytes(), len(out_i16.tobytes()), AudioTrack.WRITE_NON_BLOCKING)
+                out_bytes = out_i16.tobytes()
+                trk.write(out_bytes, len(out_bytes))
 
             rec.stop(); rec.release()
             trk.stop(); trk.release()
@@ -943,32 +976,44 @@ class MainScreen(BoxLayout):
     def _build_devices(self):
         self._section('DISPOZITIVE', C_BLUE)
 
-        # IN spinner
-        in_row = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(6))
-        in_row.add_widget(Label(text='IN:', size_hint_x=None, width=dp(36),
-                                font_size=sp(10), color=C_TEAL))
-        self._in_spin = Spinner(text='— selectează —', values=[],
-                                size_hint_x=1, font_size=sp(9),
-                                background_color=(0.1, 0.1, 0.18, 1))
-        in_row.add_widget(self._in_spin)
-        self._inner.add_widget(in_row)
+        if IS_ANDROID:
+            # Android: fără selecție dispozitive, doar info
+            info = Label(
+                text='[color=f0c040]Android: Microfon → DSP → Difuzor/Căști[/color]\n'
+                     'Pornește muzica pe telefon, apasă START.\n'
+                     'Sunetul trece prin microfon → DSP → ieșire.\n'
+                     '[color=e02d6f]NOTĂ: Pe Android nu se poate intercepta audio din sistem[/color]\n'
+                     '[color=e02d6f](ca pe desktop cu CABLE). Se procesează doar microfonul.[/color]',
+                size_hint_y=None, height=dp(80),
+                font_size=sp(8), color=C_DIM,
+                halign='left', valign='top', markup=True)
+            info.bind(size=info.setter('text_size'))
+            self._inner.add_widget(info)
+        else:
+            # Desktop: selecție dispozitive
+            in_row = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(6))
+            in_row.add_widget(Label(text='IN:', size_hint_x=None, width=dp(36),
+                                    font_size=sp(10), color=C_TEAL))
+            self._in_spin = Spinner(text='— selectează —', values=[],
+                                    size_hint_x=1, font_size=sp(9),
+                                    background_color=(0.1, 0.1, 0.18, 1))
+            in_row.add_widget(self._in_spin)
+            self._inner.add_widget(in_row)
 
-        # OUT spinner
-        out_row = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(6))
-        out_row.add_widget(Label(text='OUT:', size_hint_x=None, width=dp(36),
-                                 font_size=sp(10), color=C_TEAL))
-        self._out_spin = Spinner(text='— selectează —', values=[],
-                                 size_hint_x=1, font_size=sp(9),
-                                 background_color=(0.1, 0.1, 0.18, 1))
-        out_row.add_widget(self._out_spin)
-        self._inner.add_widget(out_row)
+            out_row = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(6))
+            out_row.add_widget(Label(text='OUT:', size_hint_x=None, width=dp(36),
+                                     font_size=sp(10), color=C_TEAL))
+            self._out_spin = Spinner(text='— selectează —', values=[],
+                                     size_hint_x=1, font_size=sp(9),
+                                     background_color=(0.1, 0.1, 0.18, 1))
+            out_row.add_widget(self._out_spin)
+            self._inner.add_widget(out_row)
 
-        # Refresh btn
-        ref_btn = Button(text='↺  Reîncarcă dispozitive',
-                         size_hint_y=None, height=dp(36), font_size=sp(10),
-                         background_color=(0.1, 0.1, 0.18, 1), color=C_TEAL)
-        ref_btn.bind(on_press=lambda b: self._refresh_devices())
-        self._inner.add_widget(ref_btn)
+            ref_btn = Button(text='↺  Reîncarcă dispozitive',
+                             size_hint_y=None, height=dp(36), font_size=sp(10),
+                             background_color=(0.1, 0.1, 0.18, 1), color=C_TEAL)
+            ref_btn.bind(on_press=lambda b: self._refresh_devices())
+            self._inner.add_widget(ref_btn)
 
         # Log
         self._log_lbl = Label(text='AudioBoost v5 — DSP Radio Profesional',
@@ -983,6 +1028,9 @@ class MainScreen(BoxLayout):
         self._log_lbl.text = msg + '\n' + '\n'.join(prev)
 
     def _refresh_devices(self):
+        if IS_ANDROID:
+            self._log('Android: audio nativ (AudioRecord/AudioTrack)')
+            return
         try:
             import sounddevice as sd
             devs = sd.query_devices()
