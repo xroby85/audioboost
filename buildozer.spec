@@ -11,6 +11,8 @@ version = 5.0
 
 requirements = python3,kivy==2.3.1,numpy
 
+services = AudioBoost:service_audio.py
+
 orientation = portrait
 fullscreen = 0
 
