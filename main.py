@@ -353,6 +353,60 @@ class TrueAmbience:
         return out
 
 
+class StereoDispersion:
+    """
+    Decorelare L/R prin 4 filtre all-pass asimetrice.
+    Pure NumPy — fără scipy.
+    Delays L: 3.1, 5.7, 8.3, 12.9 ms
+    Delays R: 4.3, 6.9, 9.7, 15.1 ms
+    Gain all-pass: 0.5 fix.
+    Wet mix: out = x*(1-amount) + dispersed*amount
+    """
+    def __init__(self, sr):
+        self.sr = sr
+        self._lock = threading.Lock()
+        g = 0.5
+        dl_ms = [3.1, 5.7, 8.3, 12.9]
+        dr_ms = [4.3, 6.9, 9.7, 15.1]
+        self._dL = [max(1, int(sr * m / 1000)) for m in dl_ms]
+        self._dR = [max(1, int(sr * m / 1000)) for m in dr_ms]
+        self._g = g
+        self._bL = [np.zeros(d) for d in self._dL]
+        self._bR = [np.zeros(d) for d in self._dR]
+        self._pL = [0] * 4
+        self._pR = [0] * 4
+
+    def _ap(self, x, buf, pos, d):
+        n = len(x); out = np.empty(n)
+        g = self._g
+        for i in range(n):
+            r = buf[pos]
+            v = x[i] - g * r
+            out[i] = r + g * v
+            buf[pos] = v
+            pos += 1
+            if pos >= d:
+                pos = 0
+        return out, pos
+
+    def process(self, x, amount):
+        with self._lock:
+            if amount < 0.01 or x.shape[1] < 2:
+                return x
+            a = min(1.0, amount)
+            L = x[:, 0].copy()
+            R = x[:, 1].copy()
+            dL = L
+            dR = R
+            for k in range(4):
+                dL, self._pL[k] = self._ap(dL, self._bL[k], self._pL[k], self._dL[k])
+                dR, self._pR[k] = self._ap(dR, self._bR[k], self._pR[k], self._dR[k])
+            out = x.copy()
+            out[:, 0] = x[:, 0] * (1 - a) + dL * a
+            out[:, 1] = x[:, 1] * (1 - a) + dR * a
+            return out
+
+
 class RadioDSP:
     def __init__(self, sr=44100, ch=2):
         self.sr = sr; self.ch = ch
@@ -573,13 +627,13 @@ class RadioDSP:
 # ══════════════════════════════════════════════════════════════
 
 PRESETS = {
-    "Kiss FM":     dict(in_db=0,bd=5,  td=3.5,pd=4,  ex=0.35,thr=-22,rat=5,mkup=8, pmix=0.40,sw=1.55,haas=12,od=1.0, ds=4.0,up=0.30,amb_wet=0.0,amb_room=0.50,sur_str=0.0),
-    "Kiss FM Pro": dict(in_db=0,bd=4.5,td=3,  pd=3.5,ex=0.40,thr=-20,rat=4,mkup=7, pmix=0.35,sw=1.60,haas=10,od=0.8, ds=6.0,up=0.45,amb_wet=0.0,amb_room=0.50,sur_str=0.0),
-    "Boom3D":      dict(in_db=0,bd=3,  td=4,  pd=2,  ex=0.45,thr=-18,rat=3,mkup=5, pmix=0.25,sw=1.80,haas=14,od=0.5, ds=5.0,up=0.55,amb_wet=0.40,amb_room=0.55,sur_str=0.6),
-    "Rock FM":     dict(in_db=0,bd=3,  td=4,  pd=4,  ex=0.40,thr=-20,rat=4,mkup=6, pmix=0.30,sw=1.60,haas=8, od=0.5, ds=4.0,up=0.20,amb_wet=0.0,amb_room=0.50,sur_str=0.0),
-    "Bass Club":   dict(in_db=0,bd=8,  td=1,  pd=1,  ex=0.10,thr=-24,rat=6,mkup=9, pmix=0.45,sw=1.40,haas=0, od=1.5, ds=0.0,up=0.00,amb_wet=0.0,amb_room=0.50,sur_str=0.0),
-    "Crisp HiFi":  dict(in_db=0,bd=0,  td=5,  pd=5,  ex=0.50,thr=-16,rat=2,mkup=3, pmix=0.15,sw=1.70,haas=15,od=0.0, ds=5.0,up=0.65,amb_wet=0.20,amb_room=0.45,sur_str=0.0),
-    "Flat":        dict(in_db=0,bd=0,  td=0,  pd=0,  ex=0.00,thr=-10,rat=1,mkup=0, pmix=0.00,sw=1.00,haas=0, od=0.0, ds=0.0,up=0.00,amb_wet=0.0,amb_room=0.50,sur_str=0.0),
+    "Kiss FM":     dict(in_db=0,bd=5,  td=3.5,pd=4,  ex=0.35,thr=-22,rat=5,mkup=8, pmix=0.40,sw=1.55,haas=12,od=1.0, ds=4.0,up=0.30,amb_wet=0.0,amb_room=0.50,sur_str=0.0,dsp_str=0.0),
+    "Kiss FM Pro": dict(in_db=0,bd=4.5,td=3,  pd=3.5,ex=0.40,thr=-20,rat=4,mkup=7, pmix=0.35,sw=1.60,haas=10,od=0.8, ds=6.0,up=0.45,amb_wet=0.0,amb_room=0.50,sur_str=0.0,dsp_str=0.0),
+    "Boom3D":      dict(in_db=0,bd=3,  td=4,  pd=2,  ex=0.45,thr=-18,rat=3,mkup=5, pmix=0.25,sw=1.80,haas=14,od=0.5, ds=5.0,up=0.55,amb_wet=0.40,amb_room=0.55,sur_str=0.6,dsp_str=0.3),
+    "Rock FM":     dict(in_db=0,bd=3,  td=4,  pd=4,  ex=0.40,thr=-20,rat=4,mkup=6, pmix=0.30,sw=1.60,haas=8, od=0.5, ds=4.0,up=0.20,amb_wet=0.0,amb_room=0.50,sur_str=0.0,dsp_str=0.0),
+    "Bass Club":   dict(in_db=0,bd=8,  td=1,  pd=1,  ex=0.10,thr=-24,rat=6,mkup=9, pmix=0.45,sw=1.40,haas=0, od=1.5, ds=0.0,up=0.00,amb_wet=0.0,amb_room=0.50,sur_str=0.0,dsp_str=0.0),
+    "Crisp HiFi":  dict(in_db=0,bd=0,  td=5,  pd=5,  ex=0.50,thr=-16,rat=2,mkup=3, pmix=0.15,sw=1.70,haas=15,od=0.0, ds=5.0,up=0.65,amb_wet=0.20,amb_room=0.45,sur_str=0.0,dsp_str=0.15),
+    "Flat":        dict(in_db=0,bd=0,  td=0,  pd=0,  ex=0.00,thr=-10,rat=1,mkup=0, pmix=0.00,sw=1.00,haas=0, od=0.0, ds=0.0,up=0.00,amb_wet=0.0,amb_room=0.50,sur_str=0.0,dsp_str=0.0),
 }
 
 # ── EQ Presets (5 benzi parametrice) — identice cu PC ────────
@@ -855,9 +909,6 @@ class MainScreen(BoxLayout):
         self._err    = 0
         self._in_list  = []
         self._out_list = []
-        self._fx_dp  = None   # DynamicsProcessing
-        self._fx_le  = None   # LoudnessEnhancer
-        self._fx_bb  = None   # BassBoost
 
         self._build()
         Clock.schedule_once(lambda dt: self._refresh_devices(), 0.5)
@@ -915,6 +966,8 @@ class MainScreen(BoxLayout):
 
     def _on_master(self, val):
         self.dsp.set_master(val / 100.0)
+        if IS_ANDROID and self.running:
+            self._write_dsp_params()
 
     # ── Preseturi ────────────────────────────────────────────
     def _build_presets(self):
@@ -946,6 +999,7 @@ class MainScreen(BoxLayout):
         if 'amb_wet'  in p: self._amb_wet.set(p['amb_wet'])
         if 'amb_room' in p: self._amb_disp.set(p['amb_room'])
         if 'sur_str'  in p: self._sur_sl.set(p['sur_str'])
+        if 'dsp_str'  in p: self._dsp_str.set(p['dsp_str'])
         self._on_sl()
         self._log(f'Preset: {name}')
 
@@ -955,7 +1009,7 @@ class MainScreen(BoxLayout):
 
         if IS_ANDROID:
             info = Label(
-                text='[color=f0c040]EQ nativ pe tot output-ul audio[/color]\n'
+                text='[color=f0c040]DSP + EQ + Ambience + 3D system-wide[/color]\n'
                      'Apasă START pentru a activa procesarea.\n'
                      'Funcționează cu Spotify, YouTube, jocuri, etc.',
                 size_hint_y=None, height=dp(50),
@@ -1029,37 +1083,45 @@ class MainScreen(BoxLayout):
                 return i
         return None
 
-    def _apply_fx_from_sliders(self):
-        """Aplică parametrii sliderelor pe efectele native Android."""
-        from jnius import autoclass
-        sv = self._dsp_sliders
-        # LoudnessEnhancer: output gain → targetGain (millibel)
-        if getattr(self, '_fx_le', None):
-            try:
-                self._fx_le.setTargetGain(int(sv['od'].get() * 100))
-            except Exception:
-                pass
-        # BassBoost: bass slider → strength (0..1000)
-        if getattr(self, '_fx_bb', None):
-            try:
-                s = int(max(0, min(1000, sv['bd'].get() * 100)))
-                Settings = autoclass('android.media.audiofx.BassBoost$Settings')
-                self._fx_bb.setProperties(Settings(f"strength={s}"))
-            except Exception:
-                pass
-
-    def _apply_fx_peq(self, idx):
-        """Aplică o bandă PEQ pe DynamicsProcessing."""
-        if not getattr(self, '_fx_dp', None):
-            return
-        row = self._peq_rows[idx]
+    def _write_dsp_params(self):
+        """Scrie parametrii DSP în SharedPreferences pentru service."""
         try:
             from jnius import autoclass
-            EqBand = autoclass('android.media.audiofx.DynamicsProcessing$EqBand')
-            band = EqBand(True, float(row.q), float(row.freq), float(row.gain_db))
-            self._fx_dp.setEqBand(1, idx, band)
+            PythonActivity = autoclass('org.kivy.android.PythonActivity')
+            activity = PythonActivity.mActivity
+            sp = activity.getSharedPreferences('audioboost_prefs', 0)
+            editor = sp.edit()
+
+            sv = self._dsp_sliders
+            params = {
+                'master': str(self._master_sl.get() / 100.0),
+                'in_db': str(sv['in_db'].get()),
+                'bd': str(sv['bd'].get()),
+                'td': str(sv['td'].get()),
+                'pd': str(sv['pd'].get()),
+                'ex': str(sv['ex'].get()),
+                'thr': str(sv['thr'].get()),
+                'rat': str(sv['rat'].get()),
+                'mkup': str(sv['mkup'].get()),
+                'pmix': str(sv['pmix'].get()),
+                'sw': str(sv['sw'].get()),
+                'haas': str(sv['haas'].get()),
+                'od': str(sv['od'].get()),
+                'ds': str(sv['ds'].get()),
+                'up': str(sv['up'].get()),
+                'amb_wet': str(self._amb_wet.get()),
+                'amb_room': str(self._amb_disp.get()),
+                'amb_damp': str(self._amb_damp.get()),
+                'amb_pre': str(self._amb_pre.get()),
+                'sur_str': str(self._sur_sl.get()),
+                'dsp_str': str(self._dsp_str.get()),
+            }
+
+            import json
+            editor.putString('dsp_params', json.dumps(params))
+            editor.apply()
         except Exception as e:
-            print(f"[AudioFX] PEQ band {idx} error: {e}")
+            print(f"[AudioBoost] _write_dsp_params error: {e}")
 
     # ── DSP Sliders ─────────────────────────────────────────
     def _build_dsp_sliders(self):
@@ -1104,7 +1166,7 @@ class MainScreen(BoxLayout):
             sur_str=self._sur_sl.get()
         )
         if IS_ANDROID and self.running:
-            self._apply_fx_from_sliders()
+            self._write_dsp_params()
 
     # ── Ambience + 3D ────────────────────────────────────────
     def _build_ambience(self):
@@ -1114,7 +1176,8 @@ class MainScreen(BoxLayout):
         self._amb_damp = DSPSlider('DAMPING',      0.0, 1.0, 0.45, callback=lambda v: self._on_sl())
         self._amb_pre  = DSPSlider('PRE-DELAY ms', 0.0,40.0, 15.0, unit='ms', callback=lambda v: self._on_sl())
         self._sur_sl   = DSPSlider('3D SURROUND',  0.0, 1.0,  0.0, callback=lambda v: self._on_sl())
-        for w in [self._amb_wet, self._amb_disp, self._amb_damp, self._amb_pre, self._sur_sl]:
+        self._dsp_str  = DSPSlider('DISPERSIE',    0.0, 1.0,  0.0, color=C_BLUE, callback=lambda v: self._on_sl())
+        for w in [self._amb_wet, self._amb_disp, self._amb_damp, self._amb_pre, self._sur_sl, self._dsp_str]:
             self._inner.add_widget(w)
 
         # ── Parametric EQ 5 benzi ─────────────────────────────
@@ -1151,7 +1214,7 @@ class MainScreen(BoxLayout):
         row = self._peq_rows[idx]
         self.dsp.update_peq(idx, row.freq, row.gain_db, row.q, row.enabled)
         if IS_ANDROID and self.running:
-            self._apply_fx_peq(idx)
+            self._write_dsp_params()
 
     def _on_eq_preset(self, spinner, text):
         """Aplică un preset EQ pe cele 5 benzi parametrice."""
@@ -1176,8 +1239,8 @@ class MainScreen(BoxLayout):
                 row._lv_q.text = f'Q{q:.1f}'
                 # Update DSP
                 self.dsp.update_peq(i, freq, gain, q, enabled)
-                if IS_ANDROID and self.running:
-                    self._apply_fx_peq(i)
+        if IS_ANDROID and self.running:
+            self._write_dsp_params()
         self._log(f'EQ Preset: {text}')
 
     # ── Start / Stop ─────────────────────────────────────────
@@ -1206,63 +1269,47 @@ class MainScreen(BoxLayout):
             self._log('sounddevice lipsă — instalează: pip install sounddevice')
 
     def _start_android(self):
-        """Creează efecte native Android pe session 0 (output global)."""
+        """Cere permisiunea MediaProjection pentru procesare audio system-wide."""
         try:
             from jnius import autoclass
+            PythonActivity = autoclass('org.kivy.android.PythonActivity')
+            activity = PythonActivity.mActivity
+            Context = autoclass('android.content.Context')
 
-            # ── 1. DynamicsProcessing (EQ parametric 5 benzi) ──
-            try:
-                DynamicsProcessing = autoclass('android.media.audiofx.DynamicsProcessing')
-                Eq = autoclass('android.media.audiofx.DynamicsProcessing$Eq')
-                EqBand = autoclass('android.media.audiofx.DynamicsProcessing$EqBand')
-                Config = autoclass('android.media.audiofx.DynamicsProcessing$Config')
-                bands = []
-                kiss = PRESETS["Kiss FM"]
-                peq_freqs = [80.0, 250.0, 1000.0, 4000.0, 12000.0]
-                peq_gains = [kiss['bd'], kiss['bd'] * 0.5, 0.0, kiss['td'] * 0.5, kiss['td']]
-                for i in range(5):
-                    band = EqBand(True, 1.4, peq_freqs[i], peq_gains[i])
-                    bands.append(band)
-                eq_stage = Eq(True, 5, bands)
-                config = Config(True, eq_stage, None, None, None)
-                self._fx_dp = DynamicsProcessing(0, 0, config)
-                self._fx_dp.setEnabled(True)
-                print("[AudioFX] DynamicsProcessing activ (session 0)")
-            except Exception as e:
-                print(f"[AudioFX] DynamicsProcessing indisponibil: {e}")
-                self._fx_dp = None
-
-            # ── 2. LoudnessEnhancer (gain output) ──
-            try:
-                LoudnessEnhancer = autoclass('android.media.audiofx.LoudnessEnhancer')
-                self._fx_le = LoudnessEnhancer(0)
-                self._fx_le.setTargetGain(int(kiss['od'] * 100))
-                self._fx_le.setEnabled(True)
-                print("[AudioFX] LoudnessEnhancer activ")
-            except Exception as e:
-                print(f"[AudioFX] LoudnessEnhancer indisponibil: {e}")
-                self._fx_le = None
-
-            # ── 3. BassBoost ──
-            try:
-                BassBoost = autoclass('android.media.audiofx.BassBoost')
-                self._fx_bb = BassBoost(0, 0)
-                self._fx_bb.setEnabled(True)
-                strength = int(min(1000, kiss['bd'] * 100))
-                Settings = autoclass('android.media.audiofx.BassBoost$Settings')
-                self._fx_bb.setProperties(Settings(f"strength={strength}"))
-                print("[AudioFX] BassBoost activ")
-            except Exception as e:
-                print(f"[AudioFX] BassBoost indisponibil: {e}")
-                self._fx_bb = None
-
-            self.running = True
-            self._start_btn.text = '⏹  OPREȘTE'
-            self._log('▶ Efecte native active (EQ + Bass + Loudness)')
-            self._log('  Redă muzică în Spotify/YouTube/jocuri')
+            REQUEST_CODE_MP = 1001
+            MProjectionManager = autoclass(
+                'android.media.projection.MediaProjectionManager')
+            mp_mgr = activity.getSystemService(Context.MEDIA_PROJECTION_SERVICE)
+            intent = mp_mgr.createScreenCaptureIntent()
+            activity.startActivityForResult(intent, REQUEST_CODE_MP)
+            self._log('Cere permisiune audio...')
 
         except Exception as e:
             self._log(f'EROARE: {e}')
+            self._start_btn.state = 'normal'
+
+    def _start_service_with_projection(self, result_code, result_data):
+        """Pornește service-ul cu MediaProjection."""
+        try:
+            from jnius import autoclass
+            PythonActivity = autoclass('org.kivy.android.PythonActivity')
+            activity = PythonActivity.mActivity
+            Intent = autoclass('android.content.Intent')
+
+            service_cls = autoclass('org.audioboost.AudioBoost')
+            intent = Intent(activity, service_cls)
+            intent.putExtra('resultCode', result_code)
+            intent.putExtra('resultData', result_data)
+            activity.startForegroundService(intent)
+
+            self.running = True
+            self._start_btn.text = '⏹  OPREȘTE'
+            self._log('▶ DSP + EQ + Ambience + 3D active!')
+            self._log('  Redă muzică în Spotify/YouTube/jocuri')
+            # Write initial params
+            self._write_dsp_params()
+        except Exception as e:
+            self._log(f'EROARE service: {e}')
             self._start_btn.state = 'normal'
 
     def _start_desktop(self):
@@ -1298,7 +1345,7 @@ class MainScreen(BoxLayout):
     def _stop(self):
         Clock.unschedule(self._vu_tick)
         if IS_ANDROID:
-            self._stop_android()
+            self._stop_android_service()
         else:
             if self.stream:
                 try: self.stream.stop(); self.stream.close()
@@ -1310,16 +1357,17 @@ class MainScreen(BoxLayout):
         self.vu.update(-60)
         self._log('⏸ Oprit.')
 
-    def _stop_android(self):
-        """Release efecte native Android."""
-        for attr in ('_fx_dp', '_fx_le', '_fx_bb'):
-            fx = getattr(self, attr, None)
-            if fx:
-                try:
-                    fx.release()
-                except Exception:
-                    pass
-            setattr(self, attr, None)
+    def _stop_android_service(self):
+        """Oprește service-ul Android."""
+        try:
+            from jnius import autoclass
+            PythonActivity = autoclass('org.kivy.android.PythonActivity')
+            activity = PythonActivity.mActivity
+            Intent = autoclass('android.content.Intent')
+            service_cls = autoclass('org.audioboost.AudioBoost')
+            activity.stopService(Intent(activity, service_cls))
+        except Exception:
+            pass
 
     def _cb(self, indata, outdata, frames, time_info, status):
         try:
@@ -1353,6 +1401,34 @@ class AudioBoostApp(KivyApp):
     def on_start(self):
         if IS_ANDROID:
             Clock.schedule_once(lambda dt: _request_android_permissions(), 2.0)
+            Clock.schedule_once(lambda dt: self._register_mp_callback(), 3.0)
+
+    def _register_mp_callback(self):
+        """Înregistrează callback pentru MediaProjection result."""
+        try:
+            from android.activity import on_activity_result
+            REQUEST_CODE_MP = 1001
+
+            def _on_result(requestCode, resultCode, data):
+                if requestCode != REQUEST_CODE_MP:
+                    return
+                screen = self.root
+                if resultCode == -1 and data is not None:
+                    Clock.schedule_once(
+                        lambda dt: screen._start_service_with_projection(
+                            resultCode, data), 0)
+                else:
+                    Clock.schedule_once(
+                        lambda dt: screen._log(
+                            'Permisiune audio refuzată'), 0)
+                    Clock.schedule_once(
+                        lambda dt: setattr(screen._start_btn,
+                                           'state', 'normal'), 0)
+
+            on_activity_result(REQUEST_CODE_MP, _on_result)
+            print("[AudioBoost] MediaProjection callback registered")
+        except Exception as e:
+            print(f"[AudioBoost] on_activity_result unavailable: {e}")
 
 
 def main():
