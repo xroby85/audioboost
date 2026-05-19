@@ -162,253 +162,6 @@ BLOCKSIZE = 1024
 CHANNELS  = 2
 
 
-# ══════════════════════════════════════════════════════════════
-#   ANDROID AUDIO — AudioRecord + AudioTrack via pyjnius
-# ══════════════════════════════════════════════════════════════
-
-class AndroidAudioStream:
-    """
-    Înlocuiește sounddevice pe Android.
-    Folosește AudioRecord (microfon) + AudioTrack (ieșire)
-    cu același callback ca sd.Stream.
-    """
-    def __init__(self, sr, blocksize, channels, callback):
-        self.sr = sr; self.bs = blocksize
-        self.ch = channels; self._cb = callback
-        self._running = False; self._thread = None
-        self._rec_session = 0
-        self._trk = None
-
-    def start(self):
-        self._running = True
-        self._thread = threading.Thread(target=self._loop, daemon=True)
-        self._thread.start()
-
-    def stop(self):
-        self._running = False
-        if self._thread: self._thread.join(timeout=2.0)
-
-    def close(self): self.stop()
-
-    def _loop(self):
-        try:
-            from jnius import autoclass
-            AudioRecord  = autoclass('android.media.AudioRecord')
-            AudioTrack   = autoclass('android.media.AudioTrack')
-            AudioFormat  = autoclass('android.media.AudioFormat')
-            AudioManager = autoclass('android.media.AudioManager')
-
-            # Encoding: PCM 16-bit
-            enc   = AudioFormat.ENCODING_PCM_16BIT
-            ch_in = AudioFormat.CHANNEL_IN_STEREO if self.ch==2 else AudioFormat.CHANNEL_IN_MONO
-            ch_out= AudioFormat.CHANNEL_OUT_STEREO if self.ch==2 else AudioFormat.CHANNEL_OUT_MONO
-            src   = 1   # MIC
-
-            buf_sz_in  = max(self.bs * self.ch * 2,
-                             AudioRecord.getMinBufferSize(self.sr, ch_in, enc))
-            buf_sz_out = max(self.bs * self.ch * 2,
-                             AudioTrack.getMinBufferSize(self.sr, ch_out, enc))
-
-            rec = AudioRecord(src, self.sr, ch_in, enc, buf_sz_in)
-            trk = AudioTrack(AudioManager.STREAM_MUSIC, self.sr,
-                             ch_out, enc, buf_sz_out,
-                             AudioTrack.MODE_STREAM)
-            rec.startRecording(); trk.play()
-
-            # Store session IDs for effects init
-            try:
-                self._rec_session = int(rec.getAudioSessionId())
-            except Exception:
-                self._rec_session = 0
-            try:
-                self._trk = trk
-            except Exception:
-                pass
-
-            print(f"[AndroidAudio] Pornit: {self.sr}Hz, {self.ch}ch, block={self.bs}, session={self._rec_session}")
-
-            import array as arr
-            n_samples = self.bs * self.ch
-            err_count = 0
-
-            while self._running:
-                buf_in = arr.array('h', [0] * n_samples)
-                rec.read(buf_in, n_samples)
-                # Convertim la float32 [-1, 1]
-                in_f32 = np.frombuffer(bytes(buf_in), dtype=np.int16).astype(np.float32) / 32768.0
-                indata = in_f32.reshape(-1, self.ch)
-                outdata = np.zeros_like(indata)
-                try:
-                    self._cb(indata, outdata, self.bs, None, None)
-                except Exception as cb_err:
-                    err_count += 1
-                    if err_count <= 5:
-                        print(f"[AndroidAudio] CB eroare: {cb_err}")
-                # Convertim la int16 și scriem BLOCKING (fără pierderi)
-                out_i16 = (np.clip(outdata, -1, 1) * 32767).astype(np.int16)
-                out_bytes = out_i16.tobytes()
-                trk.write(out_bytes, len(out_bytes))
-
-            rec.stop(); rec.release()
-            trk.stop(); trk.release()
-        except Exception as e:
-            print(f"[AndroidAudio] Eroare: {e}")
-
-
-# ══════════════════════════════════════════════════════════════
-#   ANDROID AUDIO EFFECTS — Equalizer + BassBoost nativ
-#   Procesează OUTPUT-ul audio al sistemului (nu microfonul)
-# ══════════════════════════════════════════════════════════════
-
-class AndroidAudioEffects:
-    """
-    Folosește android.media.audiofx.Equalizer + DynamicsProcessing
-    pentru a procesa audio output la nivel de sistem.
-
-    Equalizer: 5 benzi parametrice (frecvențe fixe, gain -15..+15 dB)
-    DynamicsProcessing: EQ parametric cu Q controlabil (Android 9+)
-    BassBoost: boost bass nativ
-    """
-    def __init__(self, session_id=0):
-        self._session = session_id
-        self._eq = None
-        self._dp = None
-        self._bass = None
-        self._num_bands = 0
-        self._band_freqs = []
-        self._initialized = False
-        self._dp_available = False
-
-    def init(self):
-        """Inițializează efectele audio. Fiecare efect are try-except separat."""
-        try:
-            from jnius import autoclass
-        except Exception as e:
-            print(f"[AudioFX] jnius indisponibil: {e}")
-            return False
-
-        any_ok = False
-
-        # ── Equalizer (disponibil de la API 9) ──
-        try:
-            Equalizer = autoclass('android.media.audiofx.Equalizer')
-            self._eq = Equalizer(0, self._session)
-            self._eq.setEnabled(True)
-            self._num_bands = int(self._eq.getNumberOfBands())
-            self._band_freqs = []
-            for i in range(self._num_bands):
-                freq_millihz = self._eq.getCenterFreq(i)
-                self._band_freqs.append(freq_millihz / 1000.0)
-            print(f"[AudioFX] Equalizer: {self._num_bands} benzi, freq={self._band_freqs}")
-            any_ok = True
-        except Exception as e:
-            print(f"[AudioFX] Equalizer indisponibil: {e}")
-
-        # ── BassBoost (API 9+) ──
-        try:
-            BassBoost = autoclass('android.media.audiofx.BassBoost')
-            self._bass = BassBoost(0, self._session)
-            self._bass.setEnabled(True)
-            print("[AudioFX] BassBoost: activ")
-            any_ok = True
-        except Exception as e:
-            print(f"[AudioFX] BassBoost indisponibil: {e}")
-
-        # ── DynamicsProcessing (API 28+ / Android 9) — EQ cu Q controlabil ──
-        try:
-            DynamicsProcessing = autoclass('android.media.audiofx.DynamicsProcessing')
-            DynamicsProcessingConfig = autoclass('android.media.audiofx.DynamicsProcessing$Config')
-            Eq = autoclass('android.media.audiofx.DynamicsProcessing$Eq')
-            EqBand = autoclass('android.media.audiofx.DynamicsProcessing$EqBand')
-            bands = []
-            default_freqs = [80.0, 250.0, 1000.0, 4000.0, 12000.0]
-            for f in default_freqs:
-                band = EqBand(True, 1.4, f, 0.0)
-                bands.append(band)
-            eq_stage = Eq(True, 5, bands)
-            config = DynamicsProcessingConfig(True, eq_stage, None, None, None)
-            self._dp = DynamicsProcessing(0, self._session, config)
-            self._dp.setEnabled(True)
-            self._dp_available = True
-            print("[AudioFX] DynamicsProcessing: activ (EQ parametric cu Q)")
-            any_ok = True
-        except Exception as e:
-            print(f"[AudioFX] DynamicsProcessing indisponibil: {e}")
-            self._dp_available = False
-
-        self._initialized = any_ok
-        return any_ok
-
-    def set_band_gain(self, band_idx, gain_db):
-        """Setează gain-ul pentru o bandă EQ (-1500..+1500 millibel)."""
-        if not self._initialized or self._eq is None:
-            return
-        if band_idx < 0 or band_idx >= self._num_bands:
-            return
-        try:
-            mb = int(gain_db * 100)  # dB → millibel
-            # Clamp la limitele efectului
-            lo = int(self._eq.getBandLevelRange()[0])
-            hi = int(self._eq.getBandLevelRange()[1])
-            mb = max(lo, min(hi, mb))
-            self._eq.setBandLevel(band_idx, mb)
-        except Exception as e:
-            print(f"[AudioFX] set_band_gain eroare: {e}")
-
-    def set_dp_band(self, band_idx, freq, gain_db, q):
-        """Setează o bandă DynamicsProcessing (EQ parametric cu Q)."""
-        if not self._dp_available or self._dp is None:
-            return
-        if band_idx < 0 or band_idx >= 5:
-            return
-        try:
-            from jnius import autoclass
-            EqBand = autoclass('android.media.audiofx.DynamicsProcessing$EqBand')
-            band = EqBand(True, float(q), float(freq), float(gain_db))
-            # setEqBand(stage, bandIndex, band)
-            # stage: 0=pre-processing, 1=post-processing
-            self._dp.setEqBand(1, band_idx, band)
-        except Exception as e:
-            print(f"[AudioFX] set_dp_band eroare: {e}")
-
-    def set_bass_boost(self, strength_0_1000):
-        """Setează BassBoost (0..1000 millibel)."""
-        if not self._initialized or self._bass is None:
-            return
-        try:
-            settings = self._bass.getProperties()
-            # strength: 0..1000
-            s = max(0, min(1000, int(strength_0_1000)))
-            # Creăm Settings cu noua valoare
-            BassBoostSettings = autoclass('android.media.audiofx.BassBoost$Settings')
-            new_settings = BassBoostSettings(f"strength={s}")
-            self._bass.setProperties(new_settings)
-        except Exception as e:
-            print(f"[AudioFX] bass_boost eroare: {e}")
-
-    def get_band_freqs(self):
-        """Returnează frecvențele centrale ale bandelor EQ (Hz)."""
-        return list(self._band_freqs)
-
-    def get_num_bands(self):
-        return self._num_bands
-
-    def has_dynamics_processing(self):
-        return self._dp_available
-
-    def release(self):
-        """Eliberează resursele."""
-        try:
-            if self._eq: self._eq.release()
-        except: pass
-        try:
-            if self._bass: self._bass.release()
-        except: pass
-        try:
-            if self._dp: self._dp.release()
-        except: pass
-        self._initialized = False
-
 def _mc(sos, x, zi):
     ch = x.shape[1]; y = np.empty_like(x); zi_new = np.empty_like(zi)
     for c in range(ch):
@@ -1102,6 +855,9 @@ class MainScreen(BoxLayout):
         self._err    = 0
         self._in_list  = []
         self._out_list = []
+        self._fx_dp  = None   # DynamicsProcessing
+        self._fx_le  = None   # LoudnessEnhancer
+        self._fx_bb  = None   # BassBoost
 
         self._build()
         Clock.schedule_once(lambda dt: self._refresh_devices(), 0.5)
@@ -1159,8 +915,6 @@ class MainScreen(BoxLayout):
 
     def _on_master(self, val):
         self.dsp.set_master(val / 100.0)
-        if IS_ANDROID and self.running:
-            self._write_dsp_params()
 
     # ── Preseturi ────────────────────────────────────────────
     def _build_presets(self):
@@ -1193,8 +947,6 @@ class MainScreen(BoxLayout):
         if 'amb_room' in p: self._amb_disp.set(p['amb_room'])
         if 'sur_str'  in p: self._sur_sl.set(p['sur_str'])
         self._on_sl()
-        if IS_ANDROID and self.running:
-            self._write_dsp_params()
         self._log(f'Preset: {name}')
 
     # ── Dispozitive ─────────────────────────────────────────
@@ -1277,9 +1029,37 @@ class MainScreen(BoxLayout):
                 return i
         return None
 
-    def _write_dsp_params(self):
-        """No-op pe Android."""
-        pass
+    def _apply_fx_from_sliders(self):
+        """Aplică parametrii sliderelor pe efectele native Android."""
+        from jnius import autoclass
+        sv = self._dsp_sliders
+        # LoudnessEnhancer: output gain → targetGain (millibel)
+        if getattr(self, '_fx_le', None):
+            try:
+                self._fx_le.setTargetGain(int(sv['od'].get() * 100))
+            except Exception:
+                pass
+        # BassBoost: bass slider → strength (0..1000)
+        if getattr(self, '_fx_bb', None):
+            try:
+                s = int(max(0, min(1000, sv['bd'].get() * 100)))
+                Settings = autoclass('android.media.audiofx.BassBoost$Settings')
+                self._fx_bb.setProperties(Settings(f"strength={s}"))
+            except Exception:
+                pass
+
+    def _apply_fx_peq(self, idx):
+        """Aplică o bandă PEQ pe DynamicsProcessing."""
+        if not getattr(self, '_fx_dp', None):
+            return
+        row = self._peq_rows[idx]
+        try:
+            from jnius import autoclass
+            EqBand = autoclass('android.media.audiofx.DynamicsProcessing$EqBand')
+            band = EqBand(True, float(row.q), float(row.freq), float(row.gain_db))
+            self._fx_dp.setEqBand(1, idx, band)
+        except Exception as e:
+            print(f"[AudioFX] PEQ band {idx} error: {e}")
 
     # ── DSP Sliders ─────────────────────────────────────────
     def _build_dsp_sliders(self):
@@ -1324,7 +1104,7 @@ class MainScreen(BoxLayout):
             sur_str=self._sur_sl.get()
         )
         if IS_ANDROID and self.running:
-            self._write_dsp_params()
+            self._apply_fx_from_sliders()
 
     # ── Ambience + 3D ────────────────────────────────────────
     def _build_ambience(self):
@@ -1371,7 +1151,7 @@ class MainScreen(BoxLayout):
         row = self._peq_rows[idx]
         self.dsp.update_peq(idx, row.freq, row.gain_db, row.q, row.enabled)
         if IS_ANDROID and self.running:
-            self._write_dsp_params()
+            self._apply_fx_peq(idx)
 
     def _on_eq_preset(self, spinner, text):
         """Aplică un preset EQ pe cele 5 benzi parametrice."""
@@ -1396,8 +1176,8 @@ class MainScreen(BoxLayout):
                 row._lv_q.text = f'Q{q:.1f}'
                 # Update DSP
                 self.dsp.update_peq(i, freq, gain, q, enabled)
-        if IS_ANDROID and self.running:
-            self._write_dsp_params()
+                if IS_ANDROID and self.running:
+                    self._apply_fx_peq(i)
         self._log(f'EQ Preset: {text}')
 
     # ── Start / Stop ─────────────────────────────────────────
@@ -1426,45 +1206,63 @@ class MainScreen(BoxLayout):
             self._log('sounddevice lipsă — instalează: pip install sounddevice')
 
     def _start_android(self):
-        """Cere permisiunea MediaProjection pentru procesare audio system-wide."""
+        """Creează efecte native Android pe session 0 (output global)."""
         try:
             from jnius import autoclass
-            PythonActivity = autoclass('org.kivy.android.PythonActivity')
-            activity = PythonActivity.mActivity
-            Context = autoclass('android.content.Context')
 
-            REQUEST_CODE_MP = 1001
-            MProjectionManager = autoclass(
-                'android.media.projection.MediaProjectionManager')
-            mp_mgr = activity.getSystemService(Context.MEDIA_PROJECTION_SERVICE)
-            intent = mp_mgr.createScreenCaptureIntent()
-            activity.startActivityForResult(intent, REQUEST_CODE_MP)
-            self._log('Cere permisiune audio...')
+            # ── 1. DynamicsProcessing (EQ parametric 5 benzi) ──
+            try:
+                DynamicsProcessing = autoclass('android.media.audiofx.DynamicsProcessing')
+                Eq = autoclass('android.media.audiofx.DynamicsProcessing$Eq')
+                EqBand = autoclass('android.media.audiofx.DynamicsProcessing$EqBand')
+                Config = autoclass('android.media.audiofx.DynamicsProcessing$Config')
+                bands = []
+                kiss = PRESETS["Kiss FM"]
+                peq_freqs = [80.0, 250.0, 1000.0, 4000.0, 12000.0]
+                peq_gains = [kiss['bd'], kiss['bd'] * 0.5, 0.0, kiss['td'] * 0.5, kiss['td']]
+                for i in range(5):
+                    band = EqBand(True, 1.4, peq_freqs[i], peq_gains[i])
+                    bands.append(band)
+                eq_stage = Eq(True, 5, bands)
+                config = Config(True, eq_stage, None, None, None)
+                self._fx_dp = DynamicsProcessing(0, 0, config)
+                self._fx_dp.setEnabled(True)
+                print("[AudioFX] DynamicsProcessing activ (session 0)")
+            except Exception as e:
+                print(f"[AudioFX] DynamicsProcessing indisponibil: {e}")
+                self._fx_dp = None
 
-        except Exception as e:
-            self._log(f'EROARE: {e}')
-            self._start_btn.state = 'normal'
+            # ── 2. LoudnessEnhancer (gain output) ──
+            try:
+                LoudnessEnhancer = autoclass('android.media.audiofx.LoudnessEnhancer')
+                self._fx_le = LoudnessEnhancer(0)
+                self._fx_le.setTargetGain(int(kiss['od'] * 100))
+                self._fx_le.setEnabled(True)
+                print("[AudioFX] LoudnessEnhancer activ")
+            except Exception as e:
+                print(f"[AudioFX] LoudnessEnhancer indisponibil: {e}")
+                self._fx_le = None
 
-    def _start_service_with_projection(self, result_code, result_data):
-        """Pornește service-ul cu MediaProjection."""
-        try:
-            from jnius import autoclass
-            PythonActivity = autoclass('org.kivy.android.PythonActivity')
-            activity = PythonActivity.mActivity
-            Intent = autoclass('android.content.Intent')
-
-            service_cls = autoclass('org.audioboost.AudioBoost')
-            intent = Intent(activity, service_cls)
-            intent.putExtra('resultCode', result_code)
-            intent.putExtra('resultData', result_data)
-            activity.startForegroundService(intent)
+            # ── 3. BassBoost ──
+            try:
+                BassBoost = autoclass('android.media.audiofx.BassBoost')
+                self._fx_bb = BassBoost(0, 0)
+                self._fx_bb.setEnabled(True)
+                strength = int(min(1000, kiss['bd'] * 100))
+                Settings = autoclass('android.media.audiofx.BassBoost$Settings')
+                self._fx_bb.setProperties(Settings(f"strength={strength}"))
+                print("[AudioFX] BassBoost activ")
+            except Exception as e:
+                print(f"[AudioFX] BassBoost indisponibil: {e}")
+                self._fx_bb = None
 
             self.running = True
             self._start_btn.text = '⏹  OPREȘTE'
-            self._log('▶ Procesare audio system-wide!')
-            self._log('  Redă muzică în Spotify/YouTube')
+            self._log('▶ Efecte native active (EQ + Bass + Loudness)')
+            self._log('  Redă muzică în Spotify/YouTube/jocuri')
+
         except Exception as e:
-            self._log(f'EROARE service: {e}')
+            self._log(f'EROARE: {e}')
             self._start_btn.state = 'normal'
 
     def _start_desktop(self):
@@ -1500,33 +1298,28 @@ class MainScreen(BoxLayout):
     def _stop(self):
         Clock.unschedule(self._vu_tick)
         if IS_ANDROID:
-            self._stop_android_service()
+            self._stop_android()
         else:
             if self.stream:
                 try: self.stream.stop(); self.stream.close()
                 except: pass
                 self.stream = None
-        if hasattr(self, '_fx') and self._fx:
-            try: self._fx.release()
-            except: pass
-            self._fx = None
         self.running = False
         self._start_btn.text = '▶  PORNEȘTE'
         self._start_btn.state = 'normal'
         self.vu.update(-60)
         self._log('⏸ Oprit.')
 
-    def _stop_android_service(self):
-        """Oprește service-ul Android."""
-        try:
-            from jnius import autoclass
-            PythonActivity = autoclass('org.kivy.android.PythonActivity')
-            activity = PythonActivity.mActivity
-            Intent = autoclass('android.content.Intent')
-            service_cls = autoclass('org.audioboost.AudioBoost')
-            activity.stopService(Intent(activity, service_cls))
-        except Exception:
-            pass
+    def _stop_android(self):
+        """Release efecte native Android."""
+        for attr in ('_fx_dp', '_fx_le', '_fx_bb'):
+            fx = getattr(self, attr, None)
+            if fx:
+                try:
+                    fx.release()
+                except Exception:
+                    pass
+            setattr(self, attr, None)
 
     def _cb(self, indata, outdata, frames, time_info, status):
         try:
@@ -1560,34 +1353,6 @@ class AudioBoostApp(KivyApp):
     def on_start(self):
         if IS_ANDROID:
             Clock.schedule_once(lambda dt: _request_android_permissions(), 2.0)
-            Clock.schedule_once(lambda dt: self._register_mp_callback(), 3.0)
-
-    def _register_mp_callback(self):
-        """Înregistrează callback pentru MediaProjection result."""
-        try:
-            from android.activity import on_activity_result
-            REQUEST_CODE_MP = 1001
-
-            def _on_result(requestCode, resultCode, data):
-                if requestCode != REQUEST_CODE_MP:
-                    return
-                screen = self.root
-                if resultCode == -1 and data is not None:
-                    Clock.schedule_once(
-                        lambda dt: screen._start_service_with_projection(
-                            resultCode, data), 0)
-                else:
-                    Clock.schedule_once(
-                        lambda dt: screen._log(
-                            'Permisiune audio refuzată'), 0)
-                    Clock.schedule_once(
-                        lambda dt: setattr(screen._start_btn,
-                                           'state', 'normal'), 0)
-
-            on_activity_result(REQUEST_CODE_MP, _on_result)
-            print("[AudioBoost] MediaProjection callback registered")
-        except Exception as e:
-            print(f"[AudioBoost] on_activity_result unavailable: {e}")
 
 
 def main():
